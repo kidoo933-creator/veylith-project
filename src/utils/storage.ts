@@ -1,265 +1,535 @@
-import { CaseRecord, EvidenceItem, Finding, SeverityLevel } from '../types';
+import { CaseRecord, EvidenceItem, Finding, SeverityLevel, CorrelationStatus } from '../types';
+import { normalizeFinding } from './findingNormalization';
+import { TRAINING_SCENARIO_CASES, INITIAL_CASES } from '../data/trainingFixtures';
 
-const STORAGE_KEY = 'veylith_cases_v1';
-const ACTIVE_CASE_KEY = 'veylith_active_case_id';
+export { TRAINING_SCENARIO_CASES, INITIAL_CASES };
 
-export const INITIAL_CASES: CaseRecord[] = [
-  {
-    id: '#VY-2025-0047',
-    title: 'Malicious File Analysis',
-    description: 'Analysis of a suspicious executable file identified in internal perimeter telemetry attempting outbound beaconing to untrusted infrastructure.',
-    priority: 'High',
-    status: 'In Progress',
-    leadAnalyst: 'Alex Carter',
-    createdAt: '2025-04-21T09:30:00Z',
-    updatedAt: '2025-04-22T14:18:00Z',
-    scope: ['Perimeter Gateway', 'DESKTOP-01', 'DNS Logs'],
-    tags: ['malware', 'file_analysis', 'C2', 'powershell'],
-    evidence: [
-      {
-        id: 'ev-1',
-        caseId: '#VY-2025-0047',
-        name: 'invoice_update.exe',
-        type: 'file',
-        value: '3f2a8e01bf284dc1799a941829e248b19c4d7e23118a8bcf105d15c89c4d',
-        confidence: 'Observed',
-        source: 'Endpoint Agent (DESKTOP-01)',
-        timestamp: '2025-04-21T10:15:00Z',
-        notes: 'File masquerading as PDF invoice with MZ header and high entropy.',
-      },
-      {
-        id: 'ev-2',
-        caseId: '#VY-2025-0047',
-        name: 'malicious-site.net',
-        type: 'domain',
-        value: 'malicious-site.net',
-        confidence: 'Confirmed',
-        source: 'DNS Telemetry & HTTP Probe',
-        timestamp: '2025-04-21T11:00:00Z',
-        notes: 'DGA-like domain created 14 days ago without valid TLS.',
-      },
-      {
-        id: 'ev-3',
-        caseId: '#VY-2025-0047',
-        name: '192.0.2.45',
-        type: 'ip',
-        value: '192.0.2.45',
-        confidence: 'Observed',
-        source: 'Firewall Egress Log',
-        timestamp: '2025-04-21T11:30:00Z',
-        notes: 'Target IP for recurrent 60s beacon packets.',
-      },
-      {
-        id: 'ev-4',
-        caseId: '#VY-2025-0047',
-        name: 'CVE-2024-6678',
-        type: 'cve',
-        value: 'CVE-2024-6678 (CVSS 8.8)',
-        confidence: 'Inferred',
-        source: 'Vulnerability Intelligence',
-        timestamp: '2025-04-22T08:00:00Z',
-        notes: 'Known RCE vulnerability leveraged for initial broker access.',
-      },
-    ],
-    findings: [
-      {
-        id: 'f-1',
-        title: 'Binary Masquerading via Disguised Extension',
-        description: 'The artifact invoice_update.exe has a PE32 executable header despite being delivered with PDF branding.',
-        severity: 'High',
-        confidence: 'Observed',
-        status: 'Investigating',
-        sourceTool: 'Veylith File Forensics',
-        collectedAt: '2025-04-21T10:20:00Z',
-        relevantInput: 'invoice_update.exe',
-        evidenceIds: ['ev-1'],
-      },
-      {
-        id: 'f-2',
-        title: 'C2 Infrastructure Communication Link',
-        description: 'Periodic beaconing observed from host DESKTOP-01 to 192.0.2.45 matching domain malicious-site.net.',
-        severity: 'Critical',
-        confidence: 'Confirmed',
-        status: 'Unresolved',
-        sourceTool: 'Veylith Evidence Correlator',
-        collectedAt: '2025-04-21T12:00:00Z',
-        relevantInput: '192.0.2.45',
-        evidenceIds: ['ev-2', 'ev-3'],
-      },
-    ],
-    notes: [
-      {
-        id: 'n-1',
-        author: 'Alex Carter',
-        text: 'Initial triage completed. Host DESKTOP-01 has been isolated pending RAM forensics capture.',
-        timestamp: '2025-04-21T10:45:00Z',
-      },
-      {
-        id: 'n-2',
-        author: 'Alex Carter',
-        text: 'Correlated C2 IP address with known bulletproof hosting ASN. Escalating to Incident Commander.',
-        timestamp: '2025-04-22T09:15:00Z',
-      },
-    ],
-    auditLog: [
-      {
-        id: 'a-1',
-        action: 'CASE_CREATED',
-        actor: 'Alex Carter',
-        timestamp: '2025-04-21T09:30:00Z',
-        details: 'Case initiated from perimeter telemetry trigger.',
-      },
-      {
-        id: 'a-2',
-        action: 'EVIDENCE_ADDED',
-        actor: 'Alex Carter',
-        timestamp: '2025-04-21T10:15:00Z',
-        details: 'Added file artifact invoice_update.exe with SHA-256 hash.',
-      },
-      {
-        id: 'a-3',
-        action: 'EVIDENCE_CORRELATED',
-        actor: 'Veylith Correlation Engine',
-        timestamp: '2025-04-21T12:00:00Z',
-        details: 'Correlated domain malicious-site.net with IP 192.0.2.45.',
-      },
-    ],
-  },
-  {
-    id: '#VY-2025-0048',
-    title: 'Suspicious Domain Investigation',
-    description: 'Investigation into newly registered lookalike domain mimicking corporate VPN portal.',
-    priority: 'High',
-    status: 'In Progress',
-    leadAnalyst: 'Alex Carter',
-    createdAt: '2025-04-22T07:15:00Z',
-    updatedAt: '2025-04-22T12:30:00Z',
-    scope: ['Domain Infrastructure', 'Certificate Transparency'],
-    tags: ['phishing', 'typosquatting', 'dns'],
-    evidence: [
-      {
-        id: 'ev-5',
-        caseId: '#VY-2025-0048',
-        name: 'login-corp-auth.com',
-        type: 'domain',
-        value: 'login-corp-auth.com',
-        confidence: 'Observed',
-        source: 'Certificate Transparency Logs',
-        timestamp: '2025-04-22T07:30:00Z',
-        notes: 'Domain registered via NameCheap with Let’s Encrypt certificate.',
-      },
-    ],
-    findings: [
-      {
-        id: 'f-3',
-        title: 'High-Probability Brand Impersonation Domain',
-        description: 'Domain incorporates corporate brand name with auth prefix, targeting employee Single Sign-On credentials.',
-        severity: 'High',
-        confidence: 'Confirmed',
-        status: 'Investigating',
-        sourceTool: 'Veylith Domain Intelligence',
-        collectedAt: '2025-04-22T08:00:00Z',
-        relevantInput: 'login-corp-auth.com',
-        evidenceIds: ['ev-5'],
-      },
-    ],
-    notes: [
-      {
-        id: 'n-3',
-        author: 'Alex Carter',
-        text: 'Submitted registrar takedown abuse report and updated proxy blocklists.',
-        timestamp: '2025-04-22T08:30:00Z',
-      },
-    ],
-    auditLog: [
-      {
-        id: 'a-4',
-        action: 'CASE_CREATED',
-        actor: 'Alex Carter',
-        timestamp: '2025-04-22T07:15:00Z',
-        details: 'Created case based on proactive domain monitoring alert.',
-      },
-    ],
-  },
-  {
-    id: '#VY-2025-0046',
-    title: 'Ransomware Campaign (IoC)',
-    description: 'Cross-organization threat correlation for Akira / LockBit 3.0 affiliate activity indicators.',
-    priority: 'Critical',
-    status: 'Analyzing',
-    leadAnalyst: 'Alex Carter',
-    createdAt: '2025-04-20T11:00:00Z',
-    updatedAt: '2025-04-22T06:00:00Z',
-    scope: ['Threat Intelligence', 'Active Directory', 'EDR'],
-    tags: ['ransomware', 'akira', 'lockbit', 'ioc'],
-    evidence: [],
-    findings: [],
-    notes: [],
-    auditLog: [],
-  },
-  {
-    id: '#VY-2025-0045',
-    title: 'Phishing Infrastructure',
-    description: 'Bulk analysis of adversary reverse-proxy infrastructure using Evilginx2.',
-    priority: 'Medium',
-    status: 'Open',
-    leadAnalyst: 'Security Analyst Team',
-    createdAt: '2025-04-19T14:20:00Z',
-    updatedAt: '2025-04-21T18:40:00Z',
-    scope: ['Email Gateway', 'MFA Logs'],
-    tags: ['evilginx', 'reverse_proxy', 'session_hijacking'],
-    evidence: [],
-    findings: [],
-    notes: [],
-    auditLog: [],
-  },
-  {
-    id: '#VY-2025-0044',
-    title: 'Vulnerability Assessment',
-    description: 'Audit of edge routers and VPN appliances against CISA KEV CVE-2024-3400 advisory.',
-    priority: 'Low',
-    status: 'Closed',
-    leadAnalyst: 'Alex Carter',
-    createdAt: '2025-04-18T08:00:00Z',
-    updatedAt: '2025-04-21T17:00:00Z',
-    scope: ['Edge Gateways'],
-    tags: ['cisa_kev', 'patching', 'audit'],
-    evidence: [],
-    findings: [],
-    notes: [],
-    auditLog: [],
-  },
-];
+// Partitioned LocalStorage Keys
+export const OPERATIONAL_STORAGE_KEY = 'veylith_cases_v2';
+export const TRAINING_STORAGE_KEY = 'veylith_training_cases_v2';
+export const APP_MODE_KEY = 'veylith_app_mode_v2';
+export const ACTIVE_CASE_KEY = 'veylith_active_case_id_v2';
+export const REPORTS_STORAGE_KEY = 'veylith_generated_reports_v2';
+export const ANALYST_PROFILE_KEY = 'veylith_analyst_profile_v2';
+export const LEGACY_STORAGE_KEYS = ['veylith_cases_v1', 'veylith_active_case_id', 'veylith_cases'];
 
-export function getStoredCases(): CaseRecord[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(INITIAL_CASES));
-      return INITIAL_CASES;
+export type AppMode = 'operational' | 'training';
+
+export type UserRole = 'lead_investigator' | 'forensics_analyst' | 'triage_specialist' | 'read_only_auditor';
+
+export interface AnalystProfile {
+  name: string;
+  role: string;
+  userRole?: UserRole;
+  tenantId?: string;
+  email: string;
+  callsign: string;
+}
+
+export const DEFAULT_ANALYST_PROFILE: AnalystProfile = {
+  name: 'SecOps Analyst',
+  role: 'Digital Forensics Analyst',
+  userRole: 'lead_investigator',
+  tenantId: 'tenant-default',
+  email: 'hacktheboxmeyou@gmail.com',
+  callsign: 'SA',
+};
+
+export const ROLE_PERMISSIONS: Record<
+  UserRole,
+  {
+    canCreateCase: boolean;
+    canEditCase: boolean;
+    canDeleteCase: boolean;
+    canAddEvidence: boolean;
+    canLogFinding: boolean;
+    canOverrideCorrelation: boolean;
+    canExportReport: boolean;
+    canPurgeStorage: boolean;
+  }
+> = {
+  lead_investigator: {
+    canCreateCase: true,
+    canEditCase: true,
+    canDeleteCase: true,
+    canAddEvidence: true,
+    canLogFinding: true,
+    canOverrideCorrelation: true,
+    canExportReport: true,
+    canPurgeStorage: true,
+  },
+  forensics_analyst: {
+    canCreateCase: true,
+    canEditCase: true,
+    canDeleteCase: false,
+    canAddEvidence: true,
+    canLogFinding: true,
+    canOverrideCorrelation: true,
+    canExportReport: true,
+    canPurgeStorage: false,
+  },
+  triage_specialist: {
+    canCreateCase: true,
+    canEditCase: false,
+    canDeleteCase: false,
+    canAddEvidence: true,
+    canLogFinding: true,
+    canOverrideCorrelation: false,
+    canExportReport: true,
+    canPurgeStorage: false,
+  },
+  read_only_auditor: {
+    canCreateCase: false,
+    canEditCase: false,
+    canDeleteCase: false,
+    canAddEvidence: false,
+    canLogFinding: false,
+    canOverrideCorrelation: false,
+    canExportReport: true,
+    canPurgeStorage: false,
+  },
+};
+
+export function assertRolePermission(action: keyof (typeof ROLE_PERMISSIONS)['lead_investigator']): void {
+  const profile = getAnalystProfile();
+  const role: UserRole = profile.userRole || 'lead_investigator';
+  const perms = ROLE_PERMISSIONS[role] || ROLE_PERMISSIONS.lead_investigator;
+  if (!perms[action]) {
+    throw new Error(`RBAC Authorization Denied: Role "${role}" lacks permission "${action}".`);
+  }
+}
+
+export function assertTenantAccess(caseRecord: CaseRecord, activeTenantId?: string): void {
+  const tenant = activeTenantId || getAnalystProfile().tenantId || 'tenant-default';
+  const caseTenant = caseRecord.tenantId || 'tenant-default';
+  if (caseTenant !== tenant) {
+    throw new Error(
+      `Tenant Isolation Violation: Access denied to case ${caseRecord.id} (case tenant: ${caseTenant}, active session tenant: ${tenant})`
+    );
+  }
+}
+
+export function computeFastAuditHash(
+  prevHash: string,
+  action: string,
+  actor: string,
+  timestamp: string,
+  details: string
+): string {
+  const payload = `${prevHash}|${action}|${actor}|${timestamp}|${details}`;
+  let h1 = 0xdeadbeef ^ 0;
+  let h2 = 0x41c6ce57 ^ 0;
+  let h3 = 0x811c9dc5 ^ 0;
+  let h4 = 0x9e3779b9 ^ 0;
+
+  for (let i = 0; i < payload.length; i++) {
+    const ch = payload.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+    h3 = Math.imul(h3 ^ ch, 2246822519);
+    h4 = Math.imul(h4 ^ ch, 3266489917);
+  }
+
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h3 ^ (h3 >>> 13), 3266489909);
+  h3 = Math.imul(h3 ^ (h3 >>> 16), 2246822507) ^ Math.imul(h4 ^ (h4 >>> 13), 3266489909);
+  h4 = Math.imul(h4 ^ (h4 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+
+  const hex = (n: number) => (n >>> 0).toString(16).padStart(8, '0');
+  return (hex(h1) + hex(h2) + hex(h3) + hex(h4) + hex(h1 ^ h3) + hex(h2 ^ h4) + hex(h1 ^ h4) + hex(h2 ^ h3)).toLowerCase();
+}
+
+export function createChainedAuditEntry(
+  existingAuditLog: CaseRecord['auditLog'],
+  action: string,
+  actor: string,
+  details: string,
+  timestamp?: string
+): CaseRecord['auditLog'][0] {
+  const ts = timestamp || new Date().toISOString();
+  const lastEntry = existingAuditLog && existingAuditLog.length > 0 ? existingAuditLog[existingAuditLog.length - 1] : null;
+  const prevHash = lastEntry?.hash || '0000000000000000000000000000000000000000000000000000000000000000';
+  const hash = computeFastAuditHash(prevHash, action, actor, ts, details);
+  return {
+    id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    action,
+    actor,
+    timestamp: ts,
+    details,
+    hash,
+    prevHash,
+  };
+}
+
+export function verifyCaseAuditTrailIntegrity(caseRecord: CaseRecord): {
+  isValid: boolean;
+  brokenAtIndex?: number;
+  reason?: string;
+} {
+  const logs = caseRecord.auditLog || [];
+  if (logs.length === 0) return { isValid: true };
+
+  for (let i = 0; i < logs.length; i++) {
+    const entry = logs[i];
+    if (!entry.hash) continue; // skip unhashed legacy entries
+
+    const expectedPrev = i === 0 ? '0000000000000000000000000000000000000000000000000000000000000000' : logs[i - 1].hash;
+    if (entry.prevHash && expectedPrev && entry.prevHash !== expectedPrev) {
+      return {
+        isValid: false,
+        brokenAtIndex: i,
+        reason: `Hash chain mismatch at index ${i}: prevHash "${entry.prevHash}" does not match previous entry hash "${expectedPrev}".`,
+      };
     }
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : INITIAL_CASES;
+
+    const calculatedHash = computeFastAuditHash(
+      entry.prevHash || expectedPrev || '',
+      entry.action,
+      entry.actor,
+      entry.timestamp,
+      entry.details
+    );
+    if (entry.hash !== calculatedHash) {
+      return {
+        isValid: false,
+        brokenAtIndex: i,
+        reason: `Entry digest mismatch at index ${i}: entry has been tampered with or modified after generation.`,
+      };
+    }
+  }
+
+  return { isValid: true };
+}
+
+export interface GeneratedReportRecord {
+  id: string;
+  caseId: string;
+  caseTitle: string;
+  format: 'pdf' | 'json' | 'html';
+  timestamp: string; // UTC ISO-8601
+  analystName: string;
+  findingCount: number;
+  evidenceCount: number;
+  isTrainingScenario?: boolean;
+}
+
+/**
+ * Automatically purges legacy unpartitioned storage keys so returning browsers
+ * never retain obsolete mock or seeded fixtures in operational mode.
+ */
+export function purgeLegacyStorage(): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+  try {
+    for (const key of LEGACY_STORAGE_KEYS) {
+      if (localStorage.getItem(key) !== null) {
+        localStorage.removeItem(key);
+      }
+    }
   } catch {
-    return INITIAL_CASES;
+    // Gracefully ignore storage security exceptions in sandbox environments
+  }
+}
+
+// Execute immediately on script evaluation
+purgeLegacyStorage();
+
+export function getAppMode(): AppMode {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return 'operational';
+  try {
+    const mode = localStorage.getItem(APP_MODE_KEY);
+    return mode === 'training' ? 'training' : 'operational';
+  } catch {
+    return 'operational';
+  }
+}
+
+export function setAppMode(mode: AppMode): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(APP_MODE_KEY, mode);
+  } catch {}
+}
+
+let inMemoryProfile: AnalystProfile = { ...DEFAULT_ANALYST_PROFILE };
+
+export function getAnalystProfile(): AnalystProfile {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return inMemoryProfile;
+  try {
+    const raw = localStorage.getItem(ANALYST_PROFILE_KEY);
+    if (!raw) return inMemoryProfile;
+    const parsed = JSON.parse(raw);
+    return {
+      name: parsed.name || inMemoryProfile.name,
+      role: parsed.role || inMemoryProfile.role,
+      userRole: parsed.userRole || inMemoryProfile.userRole,
+      tenantId: parsed.tenantId || inMemoryProfile.tenantId,
+      email: parsed.email || inMemoryProfile.email,
+      callsign: parsed.callsign || inMemoryProfile.callsign,
+    };
+  } catch {
+    return inMemoryProfile;
+  }
+}
+
+export function setAnalystProfile(profile: Partial<AnalystProfile>): AnalystProfile {
+  const current = getAnalystProfile();
+  const updated: AnalystProfile = { ...current, ...profile };
+  inMemoryProfile = updated;
+  if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(ANALYST_PROFILE_KEY, JSON.stringify(updated));
+    } catch {}
+  }
+  return updated;
+}
+
+/**
+ * Retrieve persisted generated report audit records.
+ */
+export function getGeneratedReports(mode?: AppMode): GeneratedReportRecord[] {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(REPORTS_STORAGE_KEY);
+    if (!raw) return [];
+    const list = JSON.parse(raw);
+    if (!Array.isArray(list)) return [];
+    const targetMode = mode || getAppMode();
+    if (targetMode === 'operational') {
+      return list.filter((r: GeneratedReportRecord) => !r.isTrainingScenario);
+    } else {
+      return list.filter((r: GeneratedReportRecord) => Boolean(r.isTrainingScenario));
+    }
+  } catch {
+    return [];
+  }
+}
+
+export function recordGeneratedReport(report: Omit<GeneratedReportRecord, 'id' | 'timestamp'>): GeneratedReportRecord {
+  const now = new Date().toISOString();
+  const isTraining = report.isTrainingScenario ?? (getAppMode() === 'training');
+  const record: GeneratedReportRecord = {
+    ...report,
+    id: `rep-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    timestamp: now,
+    isTrainingScenario: isTraining,
+  };
+  if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+    try {
+      const raw = localStorage.getItem(REPORTS_STORAGE_KEY);
+      const list = raw ? JSON.parse(raw) : [];
+      list.unshift(record);
+      localStorage.setItem(REPORTS_STORAGE_KEY, JSON.stringify(list));
+    } catch {}
+  }
+  return record;
+}
+
+export function clearGeneratedReports(mode?: AppMode): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+  try {
+    if (!mode) {
+      localStorage.removeItem(REPORTS_STORAGE_KEY);
+    } else {
+      const raw = localStorage.getItem(REPORTS_STORAGE_KEY);
+      if (!raw) return;
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) {
+        const filtered =
+          mode === 'operational'
+            ? list.filter((r: GeneratedReportRecord) => r.isTrainingScenario)
+            : list.filter((r: GeneratedReportRecord) => !r.isTrainingScenario);
+        localStorage.setItem(REPORTS_STORAGE_KEY, JSON.stringify(filtered));
+      }
+    }
+  } catch {}
+}
+
+/**
+ * In operational mode, strictly returns user-created operational cases (empty on clean slate).
+ * In training mode, returns the isolated sandbox fixtures.
+ */
+export function getStoredCases(): CaseRecord[] {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return [];
+  try {
+    const mode = getAppMode();
+    const key = mode === 'training' ? TRAINING_STORAGE_KEY : OPERATIONAL_STORAGE_KEY;
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
   }
 }
 
 export function saveCases(cases: CaseRecord[]): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cases));
+    const mode = getAppMode();
+    const key = mode === 'training' ? TRAINING_STORAGE_KEY : OPERATIONAL_STORAGE_KEY;
+    localStorage.setItem(key, JSON.stringify(cases));
   } catch (err) {
     console.error('Failed to save cases to local storage:', err);
   }
 }
 
+/**
+ * Loads isolated verification fixtures strictly into the training partition.
+ * Never pollutes or modifies operational storage.
+ */
+export function loadTrainingScenario(): CaseRecord[] {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return TRAINING_SCENARIO_CASES;
+  try {
+    setAppMode('training');
+    const cloned: CaseRecord[] = JSON.parse(JSON.stringify(TRAINING_SCENARIO_CASES));
+    localStorage.setItem(TRAINING_STORAGE_KEY, JSON.stringify(cloned));
+    if (cloned.length > 0) {
+      localStorage.setItem(ACTIVE_CASE_KEY, cloned[0].id);
+    }
+    return cloned;
+  } catch {
+    return TRAINING_SCENARIO_CASES;
+  }
+}
+
+/**
+ * Exits training mode and returns back to the authentic operational environment.
+ */
+export function exitTrainingMode(): CaseRecord[] {
+  setAppMode('operational');
+  const opCases = getStoredCases();
+  if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+    try {
+      if (opCases.length > 0) {
+        localStorage.setItem(ACTIVE_CASE_KEY, opCases[0].id);
+      } else {
+        localStorage.removeItem(ACTIVE_CASE_KEY);
+      }
+    } catch {}
+  }
+  return opCases;
+}
+
+/**
+ * Wipes cases for the active partition, or wipes everything back to pristine clean slate.
+ */
+export function clearAllCases(): CaseRecord[] {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return [];
+  try {
+    const mode = getAppMode();
+    if (mode === 'training') {
+      localStorage.setItem(TRAINING_STORAGE_KEY, JSON.stringify([]));
+      clearGeneratedReports('training');
+      setAppMode('operational');
+    }
+    localStorage.setItem(OPERATIONAL_STORAGE_KEY, JSON.stringify([]));
+    localStorage.removeItem(ACTIVE_CASE_KEY);
+    clearGeneratedReports('operational');
+    return [];
+  } catch {
+    return [];
+  }
+}
+
 export function getActiveCaseId(): string {
-  return localStorage.getItem(ACTIVE_CASE_KEY) || '#VY-2025-0047';
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return '';
+  const stored = localStorage.getItem(ACTIVE_CASE_KEY);
+  if (stored) return stored;
+  const cases = getStoredCases();
+  return cases.length > 0 ? cases[0].id : '';
 }
 
 export function setActiveCaseId(id: string): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
   localStorage.setItem(ACTIVE_CASE_KEY, id);
 }
+
+// -------------------------------------------------------------
+// METRIC AUDIT FUNCTIONS (Accurate, Ground-Truth Derived)
+// -------------------------------------------------------------
+
+/**
+ * Count only cases whose actual status qualifies as active:
+ * 'Open', 'In Progress', 'Analyzing'. Exclude 'Closed' and 'Archived'.
+ */
+export function getActiveCasesCount(cases: CaseRecord[]): number {
+  if (!Array.isArray(cases) || cases.length === 0) return 0;
+  const activeStatuses = new Set(['Open', 'In Progress', 'Analyzing']);
+  return cases.filter((c) => activeStatuses.has(c.status)).length;
+}
+
+/**
+ * Count actual unique persisted evidence records across cases.
+ * Deduplicated by ID or (type + ':' + value).
+ */
+export function getUniqueEvidenceCount(cases: CaseRecord[]): number {
+  if (!Array.isArray(cases) || cases.length === 0) return 0;
+  const seen = new Set<string>();
+  for (const c of cases) {
+    if (!Array.isArray(c.evidence)) continue;
+    for (const ev of c.evidence) {
+      const key = ev.id || `${ev.type}:${ev.value}`;
+      seen.add(key);
+    }
+  }
+  return seen.size;
+}
+
+/**
+ * Count indicators that have genuinely been reviewed according to an audit event or non-default status.
+ * Do not simply count domains, IPs, CVEs, or file hashes that exist somewhere in storage.
+ */
+export function getIndicatorsReviewedCount(cases: CaseRecord[]): number {
+  if (!Array.isArray(cases) || cases.length === 0) return 0;
+  const reviewedIndicators = new Set<string>();
+
+  for (const c of cases) {
+    // 1. Findings with reviewed status (not 'Unresolved')
+    if (Array.isArray(c.findings)) {
+      for (const f of c.findings) {
+        if (f.status && f.status !== 'Unresolved') {
+          reviewedIndicators.add(`finding:${f.id}`);
+          if (f.targetEntity) reviewedIndicators.add(`entity:${f.targetEntity}`);
+        }
+      }
+    }
+
+    // 2. Correlation overrides explicitly recorded by analyst
+    if (c.correlationOverrides) {
+      for (const [edgeId, status] of Object.entries(c.correlationOverrides)) {
+        if (status) {
+          reviewedIndicators.add(`override:${edgeId}`);
+        }
+      }
+    }
+
+    // 3. Audit trail events indicating analyst review actions
+    if (Array.isArray(c.auditLog)) {
+      for (const audit of c.auditLog) {
+        if (
+          audit.action === 'CORRELATION_OVERRIDE' ||
+          audit.action === 'FINDING_STATUS_UPDATED' ||
+          audit.action === 'STATUS_UPDATED'
+        ) {
+          reviewedIndicators.add(`audit:${audit.id}`);
+        }
+      }
+    }
+  }
+
+  return reviewedIndicators.size;
+}
+
+/**
+ * Count actual generated report records from persisted report registry.
+ */
+export function getReportsGeneratedCount(mode?: AppMode): number {
+  return getGeneratedReports(mode).length;
+}
+
+// -------------------------------------------------------------
+// CASE MUTATION OPERATIONS
+// -------------------------------------------------------------
 
 export function createCase(newCase: {
   title: string;
@@ -268,19 +538,33 @@ export function createCase(newCase: {
   leadAnalyst: string;
   scope: string[];
   tags: string[];
+  tenantId?: string;
 }): CaseRecord {
+  assertRolePermission('canCreateCase');
   const cases = getStoredCases();
-  const nextNum = cases.length + 45;
+  const nextNum = cases.length + 1;
   const id = `#VY-2025-${String(nextNum).padStart(4, '0')}`;
   const now = new Date().toISOString();
+  const profile = getAnalystProfile();
+  const analystName = newCase.leadAnalyst?.trim() || profile.name;
+  const tenantId = newCase.tenantId || profile.tenantId || 'tenant-default';
+
+  const initialAudit = createChainedAuditEntry(
+    [],
+    'CASE_CREATED',
+    analystName,
+    `Case ${id} initialized for tenant ${tenantId}.`,
+    now
+  );
 
   const createdRecord: CaseRecord = {
     id,
+    tenantId,
     title: newCase.title,
     description: newCase.description,
     priority: newCase.priority,
     status: 'Open',
-    leadAnalyst: newCase.leadAnalyst || 'Alex Carter',
+    leadAnalyst: analystName,
     createdAt: now,
     updatedAt: now,
     scope: newCase.scope,
@@ -288,15 +572,7 @@ export function createCase(newCase: {
     evidence: [],
     findings: [],
     notes: [],
-    auditLog: [
-      {
-        id: `audit-${Date.now()}`,
-        action: 'CASE_CREATED',
-        actor: newCase.leadAnalyst || 'Alex Carter',
-        timestamp: now,
-        details: `Case ${id} initialized.`,
-      },
-    ],
+    auditLog: [initialAudit],
   };
 
   cases.unshift(createdRecord);
@@ -305,10 +581,16 @@ export function createCase(newCase: {
   return createdRecord;
 }
 
-export function addEvidenceToCase(caseId: string, evidenceData: Omit<EvidenceItem, 'id' | 'timestamp'>): EvidenceItem {
+export function addEvidenceToCase(
+  caseId: string,
+  evidenceData: Omit<EvidenceItem, 'id' | 'timestamp'>,
+  activeTenantId?: string
+): EvidenceItem {
+  assertRolePermission('canAddEvidence');
   const cases = getStoredCases();
   const c = cases.find((item) => item.id === caseId);
   if (!c) throw new Error(`Case ${caseId} not found.`);
+  assertTenantAccess(c, activeTenantId);
 
   const now = new Date().toISOString();
   const item: EvidenceItem = {
@@ -318,81 +600,252 @@ export function addEvidenceToCase(caseId: string, evidenceData: Omit<EvidenceIte
     timestamp: now,
   };
 
+  const actor = getAnalystProfile().name;
   c.evidence.push(item);
   c.updatedAt = now;
-  c.auditLog.push({
-    id: `audit-${Date.now()}`,
-    action: 'EVIDENCE_ADDED',
-    actor: 'Security Analyst',
-    timestamp: now,
-    details: `Added ${item.type} evidence: "${item.name}" (${item.confidence})`,
-  });
+  c.auditLog.push(
+    createChainedAuditEntry(
+      c.auditLog,
+      'EVIDENCE_ADDED',
+      actor,
+      `Added ${item.type} evidence: "${item.name}" (${item.confidence})`,
+      now
+    )
+  );
 
   saveCases(cases);
   return item;
 }
 
-export function addFindingToCase(caseId: string, findingData: Omit<Finding, 'id' | 'collectedAt'>): Finding {
+export function addFindingToCase(
+  caseId: string,
+  findingData: Partial<Finding>,
+  activeTenantId?: string
+): Finding {
+  assertRolePermission('canLogFinding');
   const cases = getStoredCases();
   const c = cases.find((item) => item.id === caseId);
   if (!c) throw new Error(`Case ${caseId} not found.`);
+  assertTenantAccess(c, activeTenantId);
 
-  const now = new Date().toISOString();
-  const finding: Finding = {
-    ...findingData,
-    id: `f-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    collectedAt: now,
-  };
+  const finding = normalizeFinding(findingData, caseId);
+  const actor = getAnalystProfile().name;
 
   c.findings.push(finding);
-  c.updatedAt = now;
-  c.auditLog.push({
-    id: `audit-${Date.now()}`,
-    action: 'FINDING_LOGGED',
-    actor: 'Security Analyst',
-    timestamp: now,
-    details: `Logged finding: "${finding.title}" [${finding.severity}]`,
-  });
+  c.updatedAt = finding.collectedAt;
+  c.auditLog.push(
+    createChainedAuditEntry(
+      c.auditLog,
+      'FINDING_LOGGED',
+      actor,
+      `Logged finding [${finding.id}]: "${finding.title}" [${finding.severity}] (${finding.category})`,
+      finding.collectedAt
+    )
+  );
 
   saveCases(cases);
   return finding;
 }
 
-export function addNoteToCase(caseId: string, author: string, text: string): void {
+export function updateFindingStatus(
+  caseId: string,
+  findingId: string,
+  status: Finding['status'],
+  analystName?: string,
+  rationale?: string,
+  activeTenantId?: string
+): Finding | null {
+  assertRolePermission('canEditCase');
+  const cases = getStoredCases();
+  const c = cases.find((item) => item.id === caseId);
+  if (!c) return null;
+  assertTenantAccess(c, activeTenantId);
+
+  const finding = c.findings.find((f) => f.id === findingId);
+  if (!finding) return null;
+
+  const oldStatus = finding.status;
+  finding.status = status;
+  const now = new Date().toISOString();
+  c.updatedAt = now;
+  const effectiveAnalyst = analystName || getAnalystProfile().name;
+
+  c.auditLog.push(
+    createChainedAuditEntry(
+      c.auditLog,
+      'FINDING_STATUS_UPDATED',
+      effectiveAnalyst,
+      `Updated finding [${finding.id}] status from ${oldStatus} to ${status}.${rationale ? ` Reason: ${rationale}` : ''}`,
+      now
+    )
+  );
+
+  saveCases(cases);
+  return finding;
+}
+
+export function updateCorrelationOverride(
+  caseId: string,
+  edgeId: string,
+  status: CorrelationStatus,
+  analystName?: string,
+  reason?: string,
+  activeTenantId?: string
+): void {
+  assertRolePermission('canOverrideCorrelation');
   const cases = getStoredCases();
   const c = cases.find((item) => item.id === caseId);
   if (!c) return;
+  assertTenantAccess(c, activeTenantId);
+
+  if (!c.correlationOverrides) {
+    c.correlationOverrides = {};
+  }
+  c.correlationOverrides[edgeId] = status;
+  const now = new Date().toISOString();
+  c.updatedAt = now;
+  const effectiveAnalyst = analystName || getAnalystProfile().name;
+
+  c.auditLog.push(
+    createChainedAuditEntry(
+      c.auditLog,
+      'CORRELATION_OVERRIDE',
+      effectiveAnalyst,
+      `Analyst marked correlation [${edgeId}] as ${status.toUpperCase()}.${reason ? ` Justification: ${reason}` : ''}`,
+      now
+    )
+  );
+
+  saveCases(cases);
+}
+
+export function dismissCorrelation(
+  caseId: string,
+  edgeId: string,
+  analystName?: string,
+  reason?: string,
+  activeTenantId?: string
+): void {
+  const cases = getStoredCases();
+  const c = cases.find((item) => item.id === caseId);
+  if (!c) return;
+  assertTenantAccess(c, activeTenantId);
+
+  if (!c.dismissedCorrelationIds) c.dismissedCorrelationIds = [];
+  if (!c.dismissedCorrelationIds.includes(edgeId)) {
+    c.dismissedCorrelationIds.push(edgeId);
+  }
+  saveCases(cases);
+  updateCorrelationOverride(caseId, edgeId, 'dismissed', analystName, reason, activeTenantId);
+}
+
+export function markCorrelationUnverified(
+  caseId: string,
+  edgeId: string,
+  analystName?: string,
+  reason?: string,
+  activeTenantId?: string
+): void {
+  const cases = getStoredCases();
+  const c = cases.find((item) => item.id === caseId);
+  if (!c) return;
+  assertTenantAccess(c, activeTenantId);
+
+  if (!c.unverifiedCorrelationIds) c.unverifiedCorrelationIds = [];
+  if (!c.unverifiedCorrelationIds.includes(edgeId)) {
+    c.unverifiedCorrelationIds.push(edgeId);
+  }
+  saveCases(cases);
+  updateCorrelationOverride(caseId, edgeId, 'unverified', analystName, reason, activeTenantId);
+}
+
+export function restoreCorrelation(
+  caseId: string,
+  edgeId: string,
+  analystName?: string,
+  activeTenantId?: string
+): void {
+  const cases = getStoredCases();
+  const c = cases.find((item) => item.id === caseId);
+  if (!c) return;
+  assertTenantAccess(c, activeTenantId);
+
+  if (c.dismissedCorrelationIds) {
+    c.dismissedCorrelationIds = c.dismissedCorrelationIds.filter((id) => id !== edgeId);
+  }
+  if (c.unverifiedCorrelationIds) {
+    c.unverifiedCorrelationIds = c.unverifiedCorrelationIds.filter((id) => id !== edgeId);
+  }
+  saveCases(cases);
+  updateCorrelationOverride(caseId, edgeId, 'confirmed', analystName, 'Restored to confirmed status', activeTenantId);
+}
+
+export function addNoteToCase(caseId: string, author: string, text: string, activeTenantId?: string): void {
+  assertRolePermission('canEditCase');
+  const cases = getStoredCases();
+  const c = cases.find((item) => item.id === caseId);
+  if (!c) return;
+  assertTenantAccess(c, activeTenantId);
 
   const now = new Date().toISOString();
+  const effectiveAuthor = author?.trim() || getAnalystProfile().name;
   c.notes.push({
     id: `note-${Date.now()}`,
-    author,
+    author: effectiveAuthor,
     text,
     timestamp: now,
   });
   c.updatedAt = now;
+  c.auditLog.push(
+    createChainedAuditEntry(
+      c.auditLog,
+      'NOTE_ADDED',
+      effectiveAuthor,
+      `Analyst added case note (${text.slice(0, 40)}...)`,
+      now
+    )
+  );
   saveCases(cases);
 }
 
-export function updateCaseStatus(caseId: string, status: CaseRecord['status']): void {
+export function updateCaseStatus(caseId: string, status: CaseRecord['status'], activeTenantId?: string): void {
+  assertRolePermission('canEditCase');
   const cases = getStoredCases();
   const c = cases.find((item) => item.id === caseId);
   if (!c) return;
+  assertTenantAccess(c, activeTenantId);
 
   c.status = status;
   c.updatedAt = new Date().toISOString();
-  c.auditLog.push({
-    id: `audit-${Date.now()}`,
-    action: 'STATUS_UPDATED',
-    actor: 'Security Analyst',
-    timestamp: c.updatedAt,
-    details: `Case status changed to ${status}.`,
-  });
+  const actor = getAnalystProfile().name;
+  c.auditLog.push(
+    createChainedAuditEntry(
+      c.auditLog,
+      'STATUS_UPDATED',
+      actor,
+      `Case status changed to ${status}.`,
+      c.updatedAt
+    )
+  );
   saveCases(cases);
 }
 
-export function deleteCase(caseId: string): void {
+export function deleteCase(caseId: string, activeTenantId?: string): void {
+  assertRolePermission('canDeleteCase');
   let cases = getStoredCases();
+  const target = cases.find((c) => c.id === caseId);
+  if (target) {
+    assertTenantAccess(target, activeTenantId);
+  }
   cases = cases.filter((c) => c.id !== caseId);
   saveCases(cases);
+}
+
+export function getCaseById(caseId: string, activeTenantId?: string): CaseRecord | undefined {
+  const cases = getStoredCases();
+  const target = cases.find((c) => c.id === caseId);
+  if (target && activeTenantId) {
+    assertTenantAccess(target, activeTenantId);
+  }
+  return target;
 }

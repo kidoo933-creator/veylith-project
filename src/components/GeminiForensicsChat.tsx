@@ -20,30 +20,37 @@ import {
 
 interface GeminiForensicsChatProps {
   currentCase?: CaseRecord;
+  investigationContext?: any;
   isCompact?: boolean;
 }
 
 type ForensicsRole = 'lead_investigator' | 'threat_intel' | 'reverse_engineer';
-type ModelChoice = 'gemini-4-argon' | 'gemini-3.8-flash' | 'gemini-3.1-flash-lite';
+type ModelChoice = 'gemini-3.8-flash' | 'gemini-3.1-flash-lite' | 'gemini-4-argon';
 
-export const GeminiForensicsChat: React.FC<GeminiForensicsChatProps> = ({ currentCase, isCompact = false }) => {
-  const [role, setRole] = useState<ForensicsRole>('lead_investigator');
-  const [modelPreference, setModelPreference] = useState<ModelChoice>('gemini-4-argon');
+export const GeminiForensicsChat: React.FC<GeminiForensicsChatProps> = ({
+  currentCase,
+  investigationContext,
+  isCompact = false,
+}) => {
+  const [role, setRole] = useState<ForensicsRole>('threat_intel');
+  const [modelPreference, setModelPreference] = useState<ModelChoice>('gemini-3.8-flash');
   const [inputMessage, setInputMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const targetLabel = investigationContext?.domain || currentCase?.id || 'Active Investigation';
 
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 'init-1',
       role: 'model',
-      content: `Greetings Analyst. I am Veylith AI, specialized for digital forensics and defensible incident correlation.
+      content: `Greetings Analyst. I am Veylith AI Copilot, specialized for digital forensics, infrastructure hardening, and defensible incident correlation.
 
-Currently grounded in active case **${currentCase?.id || 'No Case Selected'}** (${currentCase?.evidence?.length || 0} evidence artifacts tracked).
-Select your advisor persona and model below, or ask any investigative question regarding hashes, entropy distributions, packet traces, or adversary infrastructure.`,
+Currently active context: **${targetLabel}** (${currentCase?.evidence?.length || 0} evidence artifacts tracked).
+Ask any question regarding web server hardening (Nginx / Apache / Express), curl verification commands, Shannon entropy, Android APKs, or network telemetry anomalies.`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      modelUsed: 'gemini-4-argon',
-      roleName: 'Lead DFIR Investigator',
+      modelUsed: 'gemini-3.8-flash',
+      roleName: 'Threat Intel & Infrastructure Analyst',
     },
   ]);
 
@@ -61,19 +68,19 @@ Select your advisor persona and model below, or ask any investigative question r
     ForensicsRole,
     { title: string; subtitle: string; icon: React.ReactNode; defaultModel: ModelChoice; badgeColor: string }
   > = {
+    threat_intel: {
+      title: 'Threat Intel & Hardening Analyst',
+      subtitle: 'Nginx/Apache remediation, curl checks & CISA KEV',
+      icon: <ShieldCheck className="w-4 h-4 text-blue-500" />,
+      defaultModel: 'gemini-3.8-flash',
+      badgeColor: 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 border-blue-300 dark:border-blue-800',
+    },
     lead_investigator: {
       title: 'Lead DFIR Investigator',
       subtitle: 'Complex reasoning, attack trees & court defensibility',
       icon: <BrainCircuit className="w-4 h-4 text-purple-500" />,
-      defaultModel: 'gemini-4-argon',
-      badgeColor: 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300 border-purple-300 dark:border-purple-800',
-    },
-    threat_intel: {
-      title: 'Threat Intel Analyst',
-      subtitle: 'General correlation, CISA KEV & campaign tracking',
-      icon: <ShieldCheck className="w-4 h-4 text-blue-500" />,
       defaultModel: 'gemini-3.8-flash',
-      badgeColor: 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 border-blue-300 dark:border-blue-800',
+      badgeColor: 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300 border-purple-300 dark:border-purple-800',
     },
     reverse_engineer: {
       title: 'Static Binary Specialist',
@@ -89,12 +96,51 @@ Select your advisor persona and model below, or ask any investigative question r
     setModelPreference(roleMeta[newRole].defaultModel);
   };
 
-  const quickPrompts = [
-    'Explain the high Shannon entropy in invoice_update.exe and whether it implies packing.',
-    'Correlate outbound beaconing to 192.0.2.45 with known C2 infrastructure patterns.',
-    'Review the Android APK permissions and highlight any Dangerous wiretapping indicators.',
-    'Draft a defensible 4-step evidence preservation order for the endpoint DESKTOP-01.',
-  ];
+  const quickPrompts = React.useMemo(() => {
+    if (investigationContext?.domain) {
+      const d = investigationContext.domain;
+      return [
+        `How do I fix missing security headers in Nginx for ${d}?`,
+        `Generate curl commands to verify domain security for ${d}`,
+        `Explain real-world attack scenarios for ${d} without headers`,
+        `Why are missing HTTP headers classified as Low severity?`,
+      ];
+    }
+
+    if (!currentCase || currentCase.evidence.length === 0) {
+      return [
+        'How do I fix missing security headers in Nginx?',
+        'Generate curl commands to verify domain security and headers',
+        'Explain educational attack scenarios for missing CSP & X-Frame-Options',
+        'Explain Shannon entropy (>7.2) vs benign file compression',
+        'How to detect DNS tunneling and C2 beacons in PCAP?',
+      ];
+    }
+
+    const prompts: string[] = [
+      'How do I fix missing security headers in Nginx?',
+      'Generate curl commands to verify domain security',
+    ];
+    const files = currentCase.evidence.filter((e) => e.type === 'file' || e.type === 'hash');
+    const netEntities = currentCase.evidence.filter((e) => e.type === 'ip' || e.type === 'domain');
+    const cves = currentCase.evidence.filter((e) => e.type === 'cve');
+
+    if (files.length > 0) {
+      prompts.push(`Analyze the entropy and binary structure of artifact ${files[0].name}.`);
+    }
+    if (netEntities.length > 0) {
+      prompts.push(`Correlate observed network telemetry for ${netEntities[0].value} against known threat infrastructure.`);
+    }
+    if (cves.length > 0) {
+      prompts.push(`Assess exploitability and recommended defensive controls for ${cves[0].name}.`);
+    }
+
+    if (prompts.length < 4) {
+      prompts.push(`Review findings in case ${currentCase.id} and identify unresolved investigation gaps.`);
+    }
+
+    return prompts.slice(0, 5);
+  }, [currentCase, investigationContext]);
 
   const handleSendMessage = async (textToSend?: string) => {
     const text = (textToSend || inputMessage).trim();
@@ -129,6 +175,7 @@ Select your advisor persona and model below, or ask any investigative question r
                 findings: currentCase.findings,
               }
             : undefined,
+          investigationContext,
         }),
       });
 
@@ -171,6 +218,64 @@ Select your advisor persona and model below, or ask any investigative question r
     navigator.clipboard.writeText(text);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 1500);
+  };
+
+  const renderMessageContent = (content: string, isUser: boolean, messageId: string) => {
+    if (isUser || !content.includes('```')) {
+      return (
+        <div className={`leading-relaxed whitespace-pre-wrap font-sans text-xs ${isUser ? 'text-white' : 'text-slate-800 dark:text-slate-200'}`}>
+          {content}
+        </div>
+      );
+    }
+
+    const parts = content.split(/(```[\s\S]*?```)/g);
+    return (
+      <div className="leading-relaxed space-y-2 text-xs text-slate-800 dark:text-slate-200">
+        {parts.map((part, pIdx) => {
+          if (part.startsWith('```') && part.endsWith('```')) {
+            const firstLineBreak = part.indexOf('\n');
+            const lang = firstLineBreak !== -1 ? part.slice(3, firstLineBreak).trim() : '';
+            const code = firstLineBreak !== -1 ? part.slice(firstLineBreak + 1, -3) : part.slice(3, -3);
+            const snippetKey = `${messageId}-code-${pIdx}`;
+
+            return (
+              <div key={pIdx} className="my-2 rounded-xl bg-slate-900 border border-slate-800 overflow-hidden text-[11px] font-mono">
+                <div className="flex items-center justify-between px-3 py-1.5 bg-slate-950/80 border-b border-slate-800/80 text-slate-400 text-[10px]">
+                  <span className="font-semibold uppercase tracking-wider">{lang || 'DIRECTIVE / CODE'}</span>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(code, snippetKey)}
+                    className="flex items-center gap-1 hover:text-white transition px-1.5 py-0.5 rounded hover:bg-slate-800"
+                  >
+                    {copiedId === snippetKey ? (
+                      <>
+                        <Check className="w-3 h-3 text-emerald-400" />
+                        <span className="text-emerald-400">Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3" />
+                        <span>Copy Code</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+                <pre className="p-3 text-emerald-400 overflow-x-auto leading-relaxed">
+                  <code>{code}</code>
+                </pre>
+              </div>
+            );
+          }
+
+          return (
+            <div key={pIdx} className="whitespace-pre-wrap font-sans">
+              {part}
+            </div>
+          );
+        })}
+      </div>
+    );
   };
 
   const handleClearHistory = () => {
@@ -328,10 +433,8 @@ Select your advisor persona and model below, or ask any investigative question r
                   </div>
                 )}
 
-                {/* Message Body with Markdown styling */}
-                <div className={`leading-relaxed whitespace-pre-wrap font-sans text-xs ${isUser ? 'text-white' : 'text-slate-800 dark:text-slate-200'}`}>
-                  {m.content}
-                </div>
+                {/* Message Body with Markdown and Code Container styling */}
+                {renderMessageContent(m.content, isUser, m.id)}
 
                 {isUser && (
                   <div className="text-right text-[10px] text-teal-200">

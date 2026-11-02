@@ -4,6 +4,16 @@ export type SeverityLevel = 'Critical' | 'High' | 'Medium' | 'Low' | 'Info';
 
 export type InvestigationStatus = 'Open' | 'In Progress' | 'Analyzing' | 'Closed' | 'Archived';
 
+export type FindingCategory =
+  | 'Network & Protocol'
+  | 'Binary & Static Forensics'
+  | 'Infrastructure & Recon'
+  | 'Vulnerability & Exploit'
+  | 'Hardening & Security Header'
+  | 'Correlation Observation';
+
+export type CorrelationStatus = 'confirmed' | 'unverified' | 'dismissed';
+
 export interface EvidenceItem {
   id: string;
   caseId?: string;
@@ -18,16 +28,35 @@ export interface EvidenceItem {
 }
 
 export interface Finding {
-  id: string;
+  id: string; // Unique finding ID (e.g. FND-0047-01)
+  caseId?: string; // Associated case ID
   title: string;
+  category: FindingCategory;
+  targetEntity: string; // Target or affected entity (domain, IP, file name, host, hash)
+  observedResult: string; // Actual observed result
   description: string;
   severity: SeverityLevel;
+  severityRationale?: string; // Explanation of severity weighting
   confidence: ConfidenceLevel;
   status: 'Unresolved' | 'Investigating' | 'Mitigated' | 'False Positive';
-  sourceTool: string;
-  collectedAt: string;
-  relevantInput: string;
-  evidenceIds: string[];
+  sourceTool: string; // Evidence source / tool subsystem
+  evidenceSource?: string; // Specific telemetry stream or probe
+  collectedAt: string; // UTC observation timestamp (ISO 8601)
+  timestamp?: string; // UTC observation timestamp alias
+  provenance?: string; // Sensor or extraction provenance
+  limitations?: string[]; // Bounded buffers, missing fields, or environmental constraints
+  relevantInput?: string; // Raw input tested / queried
+  evidenceIds: string[]; // Related evidence IDs
+  relatedFindingIds?: string[]; // Correlated or related finding IDs
+  riskImplications?: string; // Measured impact without hyperbole
+
+  // Phase 6 Unified Finding Confidence & Evidence Verification Architecture
+  verificationStatus?: 'VERIFIED' | 'INFERRED' | 'UNKNOWN'; // Ground-truth evidence verification
+  confidenceLevel?: 'HIGH' | 'MEDIUM' | 'LOW'; // Explainable confidence tier
+  evidenceReference?: string; // Explicit evidence pointer (e.g. "DNS A Record: 93.184.216.34", "SHA-256 Hash")
+  detectionMethod?: string; // Specific sensor/technique (e.g. "Direct Probe Observation", "Cryptographic Hash")
+  potentialFalsePositiveExplanation?: string; // Explainable conditions that could trigger false positive
+  recommendedNextStep?: string; // Concrete next step for investigator
 }
 
 export interface CaseRecord {
@@ -37,12 +66,17 @@ export interface CaseRecord {
   priority: SeverityLevel;
   status: InvestigationStatus;
   leadAnalyst: string;
+  classification?: string;
   createdAt: string;
   updatedAt: string;
   scope: string[];
   tags: string[];
   evidence: EvidenceItem[];
   findings: Finding[];
+  correlationOverrides?: Record<string, CorrelationStatus>; // edgeId -> status
+  dismissedCorrelationIds?: string[];
+  unverifiedCorrelationIds?: string[];
+  isTrainingScenario?: boolean;
   notes: {
     id: string;
     author: string;
@@ -56,20 +90,69 @@ export interface CaseRecord {
     timestamp: string;
     details: string;
   }[];
+  timeline?: any[];
+}
+
+export type ProvenanceStatus =
+  | 'Retrieved'
+  | 'Cached'
+  | 'Unavailable'
+  | 'Blocked'
+  | 'TimedOut'
+  | 'NotChecked';
+
+export interface FieldProvenance {
+  status: ProvenanceStatus;
+  source: string;
+  timestamp: string;
+  details?: string;
+  ageMs?: number;
+}
+
+export interface SecurityHeaderObservation {
+  header: string;
+  value: string | null;
+  observed: boolean;
+  status: 'Present' | 'Missing' | 'Unobserved';
+  description: string;
+  hardeningRole: string;
+  isProofOfExploit: boolean;
+}
+
+export interface RiskFactorItem {
+  id: string;
+  category: string;
+  title: string;
+  weight: number;
+  observedValue: string;
+  rationale: string;
+  mitigation: string;
 }
 
 export interface DomainAnalysisReport {
   domain: string;
-  resolvedIps: { ip: string; version: number }[];
+  targetNormalized: string;
+  analysisTimestamp: string;
+  engineVersion: string;
+  provenance: {
+    dns: FieldProvenance;
+    tls: FieldProvenance;
+    http: FieldProvenance;
+    rdap: FieldProvenance;
+  };
+  resolvedIps: { ip: string; version: number; resolver?: string; isCdnOrCloud?: boolean }[];
   dnsRecords: {
     a: string[];
     aaaa: string[];
     mx: { exchange: string; priority: number }[];
     txt: string[][];
     ns: string[];
+    cname?: string[];
   };
+  dnsFailed?: boolean;
   tlsCertificate?: {
     valid: boolean;
+    hostnameMatched: boolean;
     subject?: string;
     issuer?: string;
     validFrom?: string;
@@ -77,21 +160,148 @@ export interface DomainAnalysisReport {
     daysRemaining?: number;
     protocol?: string;
     cipher?: string;
+    error?: string;
+    provenance: FieldProvenance;
   };
   httpProbe?: {
     statusCode?: number;
     statusText?: string;
-    redirectChain: string[];
+    probeUrl: string;
+    finalUrl: string;
+    redirectChain: Array<{ url: string; statusCode?: number }>;
+    redirectCount: number;
+    httpsEnforced: boolean;
     securityHeaders: Record<string, string | null>;
     missingSecurityHeaders: string[];
+    headerObservations: SecurityHeaderObservation[];
     serverBanner?: string;
     contentLength?: number;
+    provenance: FieldProvenance;
   };
-  rdap?: any;
-  uncompletedChecks: string[];
+  rdap?: {
+    status: 'Retrieved' | 'Unavailable' | 'RateLimited' | 'Forbidden' | 'TimedOut';
+    sourceUrl?: string;
+    httpStatusCode?: number;
+    handle?: string;
+    registrar?: string;
+    registrationDate?: string;
+    expirationDate?: string;
+    lastChangedDate?: string;
+    domainStatus?: string[];
+    entities?: Array<{ handle?: string; roles?: string[]; name?: string }>;
+    rawHandle?: string;
+    errorDetails?: string;
+    provenance: FieldProvenance;
+  };
+  uncompletedChecks: Array<{ check: string; reason: string; category: string }>;
   riskScore: number;
   riskLevel: 'Low' | 'Medium' | 'High' | 'Critical';
   riskFactors: string[];
+  riskFactorDetails: RiskFactorItem[];
+  scoringLimitations: string[];
+  dataCompleteness: number; // 0 to 100%
+  ssrfGuards: {
+    passed: boolean;
+    checkedAddresses: string[];
+  };
+  aiSecurityAnalysis?: DomainAiSecurityAnalysis;
+}
+
+export type InvestigationViewMode = 'simple' | 'deep';
+
+export interface PrioritizedNextStep {
+  priority: 'Immediate' | 'High Priority' | 'Scheduled Hardening' | 'Verification';
+  action: string;
+  rationale: string;
+}
+
+export interface FindingRemediationGuide {
+  detectedTechnology?: string; // e.g. "nginx", "apache", "cloudflare", "express", "generic"
+  configSnippet: string;
+  configLocation: string; // e.g. "/etc/nginx/conf.d/security.conf"
+  verificationCommand: string; // e.g. "curl -I https://domain"
+  documentationUrl?: string; // MDN or RFC link
+  thirdPartyHostedNote?: string; // Guidance for Cloudflare, CloudFront, Vercel
+  alternativeConfigs?: Array<{
+    technology: string;
+    snippet: string;
+    location: string;
+  }>;
+}
+
+export interface SimpleFindingItem {
+  id: string;
+  title: string;
+  category: string;
+  severity: 'Informational' | 'Low' | 'Medium' | 'High' | 'Critical';
+  severityExplanation: string;
+  confidence: 'Confirmed' | 'Potential' | 'Inferred' | 'Unknown';
+  whatObserved: string;
+  whatThisMeans: string;
+  potentialRisk: string;
+  possibleAttackScenario: string;
+  howToPreventIt: string;
+  technicalDetails?: string;
+  remediationGuide?: FindingRemediationGuide;
+  // Phase 6 Unified Confidence Engine
+  verificationStatus?: 'VERIFIED' | 'INFERRED' | 'UNKNOWN';
+  confidenceLevel?: 'HIGH' | 'MEDIUM' | 'LOW';
+  evidenceReference?: string;
+  detectionMethod?: string;
+  potentialFalsePositiveExplanation?: string;
+  recommendedNextStep?: string;
+}
+
+export interface InvestigationSimpleReport {
+  target: string;
+  targetType: 'domain' | 'file' | 'pcap' | 'case';
+  generatedAt: string;
+  overallAssessment: string;
+  whatWasDiscovered: string[];
+  whatIsWorkingWell: string[];
+  securityConcerns: SimpleFindingItem[];
+  prioritizedNextSteps: PrioritizedNextStep[];
+  limitations: string[];
+  disclaimer: string;
+  isAiGenerated?: boolean;
+  modelUsed?: string;
+}
+
+export interface DomainSecurityFindingAnalysis {
+  id: string;
+  title: string;
+  category: 'Header Hardening' | 'Transport Security' | 'DNS & Infrastructure' | 'Registration & RDAP' | 'Redirect & Routing';
+  severity: 'Informational' | 'Low' | 'Medium' | 'High' | 'Critical';
+  severityExplanation: string;
+  confidence: 'Confirmed' | 'Potential' | 'Inferred' | 'Unknown';
+  whatObserved: string;
+  whatThisMeans: string;
+  potentialRisk: string;
+  possibleAttackScenario: string;
+  howToPreventIt: string;
+  technicalDetails?: string;
+  remediationGuide?: FindingRemediationGuide;
+  // Phase 6 Unified Confidence Engine
+  verificationStatus?: 'VERIFIED' | 'INFERRED' | 'UNKNOWN';
+  confidenceLevel?: 'HIGH' | 'MEDIUM' | 'LOW';
+  evidenceReference?: string;
+  detectionMethod?: string;
+  potentialFalsePositiveExplanation?: string;
+  recommendedNextStep?: string;
+}
+
+export interface DomainAiSecurityAnalysis {
+  domain: string;
+  generatedAt: string;
+  modelUsed: string;
+  isAiGenerated: boolean;
+  overallAssessment: string;
+  keyFactsObserved: string[];
+  findings: DomainSecurityFindingAnalysis[];
+  positiveHighlights: string[];
+  prioritizedNextSteps?: PrioritizedNextStep[];
+  limitations: string[];
+  disclaimer: string;
 }
 
 export interface EntropyBlock {
@@ -141,6 +351,7 @@ export interface BoundedMetadata {
     nativeArchitectures?: string[];
     hasCertificates?: boolean;
     hasDebuggableFlag?: boolean;
+    hasZipSlipTraversal?: boolean;
   };
 }
 
@@ -176,6 +387,7 @@ export interface FileAnalysisResult {
   };
   unavailableChecks: UnavailableCheck[];
   timestamp: string;
+  simpleReport?: InvestigationSimpleReport;
 }
 
 export interface ChatMessage {
@@ -188,9 +400,20 @@ export interface ChatMessage {
   isFallback?: boolean;
 }
 
+export interface PcapInterfaceInfo {
+  id: number;
+  linkType: number;
+  linkTypeName: string;
+  name?: string;
+  tsResolution: string;
+  tsOffsetSeconds: number;
+  isBinaryResolution: boolean;
+  malformedOptions?: boolean;
+}
+
 export interface PcapPacket {
   index: number;
-  timestamp: number; // microseconds or millis
+  timestamp: number; // microseconds or millis (0 if unreliable/missing)
   timeStr: string;
   length: number;
   srcIp?: string;
@@ -200,6 +423,9 @@ export interface PcapPacket {
   protocol: 'TCP' | 'UDP' | 'ICMP' | 'ARP' | 'IPv6' | 'Other';
   appProtocol?: string;
   info: string;
+  interfaceId?: number;
+  timestampUnreliable?: boolean;
+  timestampLimitation?: string;
 }
 
 export interface PcapAnalysisResult {
@@ -226,6 +452,12 @@ export interface PcapAnalysisResult {
     evidence: string;
   }[];
   packets: PcapPacket[];
+  interfaces?: PcapInterfaceInfo[];
+  linkType?: number;
+  linkTypeName?: string;
+  truncatedPacketsCount?: number;
+  unsupportedLinkType?: boolean;
+  simpleReport?: InvestigationSimpleReport;
 }
 
 export interface CveItem {
@@ -250,6 +482,7 @@ export type ViewTab =
   | 'file-forensics'
   | 'pcap-lab'
   | 'investigation-workspace'
+  | 'evidence-graph'
   | 'vulnerability-intel'
   | 'ai-analysis'
   | 'reports'

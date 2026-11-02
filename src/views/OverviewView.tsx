@@ -14,6 +14,13 @@ import {
   Clock,
   ExternalLink,
 } from 'lucide-react';
+import {
+  getActiveCasesCount,
+  getUniqueEvidenceCount,
+  getIndicatorsReviewedCount,
+  getReportsGeneratedCount,
+  getAnalystProfile,
+} from '../utils/storage';
 
 interface OverviewViewProps {
   cases: CaseRecord[];
@@ -27,6 +34,9 @@ interface OverviewViewProps {
     scope: string[];
     tags: string[];
   }) => void;
+  onLoadTrainingScenario?: () => void;
+  onClearCases?: () => void;
+  onExitTrainingMode?: () => void;
 }
 
 export const OverviewView: React.FC<OverviewViewProps> = ({
@@ -34,19 +44,25 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   onNavigate,
   onSelectCase,
   onCreateCase,
+  onLoadTrainingScenario,
+  onClearCases,
+  onExitTrainingMode,
 }) => {
+  const currentAnalyst = getAnalystProfile();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [newPriority, setNewPriority] = useState<SeverityLevel>('High');
+  const [leadAnalystInput, setLeadAnalystInput] = useState(currentAnalyst.name);
   const [newScope, setNewScope] = useState('Perimeter, DNS, Endpoint');
   const [newTags, setNewTags] = useState('threat_intel, incident_response');
 
-  // Derive real statistics from stored records
-  const activeCases = cases.filter((c) => c.status !== 'Closed' && c.status !== 'Archived').length;
-  const totalEvidence = cases.reduce((acc, c) => acc + (c.evidence?.length || 0), 0);
-  const totalIndicators = cases.reduce((acc, c) => acc + (c.evidence?.length || 0) + (c.findings?.length || 0), 0);
-  const reportsGenerated = cases.filter((c) => c.status === 'In Progress' || c.status === 'Closed').length;
+  // Derive ground-truth statistics from stored operational/training records
+  const isTrainingMode = cases.some((c) => c.isTrainingScenario);
+  const activeCases = getActiveCasesCount(cases);
+  const totalEvidence = getUniqueEvidenceCount(cases);
+  const totalIndicators = getIndicatorsReviewedCount(cases);
+  const reportsGenerated = getReportsGeneratedCount(isTrainingMode ? 'training' : 'operational');
 
   // Extract real indicators and real activity logs
   const allEvidence = cases.flatMap((c) => c.evidence || []);
@@ -64,7 +80,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
       title: newTitle.trim(),
       description: newDesc.trim() || 'No detailed scope provided.',
       priority: newPriority,
-      leadAnalyst: 'Alex Carter',
+      leadAnalyst: leadAnalystInput.trim() || currentAnalyst.name,
       scope: newScope.split(',').map((s) => s.trim()).filter(Boolean),
       tags: newTags.split(',').map((t) => t.trim()).filter(Boolean),
     });
@@ -91,6 +107,34 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Training Mode Banner */}
+      {isTrainingMode && (
+        <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs animate-in fade-in">
+          <div className="flex items-center gap-2.5 text-amber-700 dark:text-amber-400 font-semibold">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
+            <span>TRAINING SCENARIO MODE: Displaying isolated verification fixtures. This data is not operational customer telemetry.</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {onExitTrainingMode && (
+              <button
+                onClick={onExitTrainingMode}
+                className="px-3 py-1 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-lg text-xs font-bold transition"
+              >
+                Exit Training Mode
+              </button>
+            )}
+            {onClearCases && (
+              <button
+                onClick={onClearCases}
+                className="px-3 py-1 bg-amber-600/20 hover:bg-amber-600/30 text-amber-800 dark:text-amber-200 rounded-lg text-xs font-bold transition"
+              >
+                Clear to Clean Slate (0 Cases)
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Header and Quick Actions Banner */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200/80 dark:border-slate-800">
         <div>
@@ -211,51 +255,86 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-xs">
-                {cases.map((c) => (
-                  <tr
-                    key={c.id}
-                    onClick={() => {
-                      onSelectCase(c.id);
-                      onNavigate('investigation-workspace');
-                    }}
-                    className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 cursor-pointer transition group"
-                  >
-                    <td className="py-3 px-3 font-mono font-medium text-slate-900 dark:text-white">
-                      {c.id}
-                    </td>
-                    <td className="py-3 px-3 font-semibold text-slate-800 dark:text-slate-200 max-w-[200px] truncate">
-                      {c.title}
-                    </td>
-                    <td className="py-3 px-3">
-                      <span
-                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                          c.priority === 'Critical'
-                            ? 'bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300'
-                            : c.priority === 'High'
-                            ? 'bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
-                            : 'bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300'
-                        }`}
-                      >
-                        {c.priority}
-                      </span>
-                    </td>
-                    <td className="py-3 px-3 text-slate-500 dark:text-slate-400 text-[11px]">
-                      {new Date(c.updatedAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
-                    </td>
-                    <td className="py-3 px-3">
-                      <span
-                        className={`text-[10px] font-medium px-2 py-0.5 rounded-md border ${getStatusBadge(
-                          c.status
-                        )}`}
-                      >
-                        {c.status}
-                      </span>
-                    </td>
-                    <td className="py-3 px-3 text-right">
-                      <ExternalLink className="w-3.5 h-3.5 text-slate-400 group-hover:text-teal-600 dark:group-hover:text-teal-400 inline" />
+                {cases.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="py-12 text-center">
+                      <div className="flex flex-col items-center justify-center gap-2 max-w-sm mx-auto">
+                        <div className="w-12 h-12 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 mb-1">
+                          <FolderLock className="w-6 h-6" />
+                        </div>
+                        <p className="text-sm font-bold text-slate-800 dark:text-slate-200">
+                          No operational investigations yet
+                        </p>
+                        <p className="text-xs text-slate-400 leading-relaxed">
+                          Active Investigations: 0. Veylith never fabricates data or defaults to mock telemetry. Initialize your first case or load an isolated training scenario.
+                        </p>
+                        <div className="flex items-center gap-2 mt-3">
+                          <button
+                            onClick={() => setShowCreateModal(true)}
+                            className="px-3.5 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-xl font-semibold text-xs transition shadow-xs flex items-center gap-1.5"
+                          >
+                            <PlusCircle className="w-3.5 h-3.5" />
+                            <span>Create Case</span>
+                          </button>
+                          {onLoadTrainingScenario && (
+                            <button
+                              onClick={onLoadTrainingScenario}
+                              className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl font-semibold text-xs transition border border-slate-300 dark:border-slate-700"
+                            >
+                              Load Training Sandbox
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  cases.map((c) => (
+                    <tr
+                      key={c.id}
+                      onClick={() => {
+                        onSelectCase(c.id);
+                        onNavigate('investigation-workspace');
+                      }}
+                      className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 cursor-pointer transition group"
+                    >
+                      <td className="py-3 px-3 font-mono font-medium text-slate-900 dark:text-white">
+                        {c.id}
+                      </td>
+                      <td className="py-3 px-3 font-semibold text-slate-800 dark:text-slate-200 max-w-[200px] truncate">
+                        {c.title}
+                      </td>
+                      <td className="py-3 px-3">
+                        <span
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                            c.priority === 'Critical'
+                              ? 'bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300'
+                              : c.priority === 'High'
+                              ? 'bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
+                              : 'bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300'
+                          }`}
+                        >
+                          {c.priority}
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 text-slate-500 dark:text-slate-400 text-[11px]">
+                        {new Date(c.updatedAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                      </td>
+                      <td className="py-3 px-3">
+                        <span
+                          className={`text-[10px] font-medium px-2 py-0.5 rounded-md border ${getStatusBadge(
+                            c.status
+                          )}`}
+                        >
+                          {c.status}
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 text-right">
+                        <ExternalLink className="w-3.5 h-3.5 text-slate-400 group-hover:text-teal-600 dark:group-hover:text-teal-400 inline" />
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -299,7 +378,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                   </div>
                 ))
               ) : (
-                <p className="text-xs text-slate-400 py-2">No evidence items recorded yet.</p>
+                <p className="text-xs text-slate-400 py-2">No verified indicators available</p>
               )}
             </div>
           </div>
@@ -323,7 +402,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-slate-400 py-2">No investigation activity recorded yet.</p>
+              <p className="text-xs text-slate-400 py-2">No recorded activity</p>
             )}
           </div>
         </div>
@@ -397,9 +476,10 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                   </label>
                   <input
                     type="text"
-                    disabled
-                    value="Alex Carter (You)"
-                    className="w-full px-3 py-2 bg-slate-100 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-500"
+                    value={leadAnalystInput}
+                    onChange={(e) => setLeadAnalystInput(e.target.value)}
+                    placeholder="Analyst Name or Callsign"
+                    className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white outline-none focus:ring-2 focus:ring-teal-500/20"
                   />
                 </div>
               </div>

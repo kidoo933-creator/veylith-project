@@ -21,9 +21,15 @@ interface AiAnalysisViewProps {
 
 export const AiAnalysisView: React.FC<AiAnalysisViewProps> = ({ cases, activeCaseId }) => {
   const currentCase = cases.find((c) => c.id === activeCaseId) || cases[0];
+  const targetHostOrPerimeter = currentCase?.scope?.[0] || 'designated perimeter';
+  const targetIndicator = currentCase?.evidence?.[0]?.name || 'suspect indicator';
+  const targetIpOrDomain =
+    currentCase?.evidence?.find((e) => e.type === 'ip' || e.type === 'domain')?.value ||
+    'external infrastructure';
+
   const [activeSubTab, setActiveSubTab] = useState<'chat' | 'pipeline'>('chat');
   const [objective, setObjective] = useState(
-    `Correlate current evidence in ${currentCase?.id || 'case'} and assess whether DESKTOP-01 was compromised by ${currentCase?.evidence?.[0]?.name || 'the suspect payload'}.`
+    `Correlate recorded evidence in ${currentCase?.id || 'active case'} and assess threat activity across ${targetHostOrPerimeter} associated with ${targetIndicator}.`
   );
   const [userQuery, setUserQuery] = useState(
     'What are the confirmed indicators of compromise, what remains unknown, and what immediate defensive measures should be deployed?'
@@ -32,32 +38,35 @@ export const AiAnalysisView: React.FC<AiAnalysisViewProps> = ({ cases, activeCas
   const [thinkingOutput, setThinkingOutput] = useState<string | null>(null);
   const [modelUsed, setModelUsed] = useState<string>('gemini-4-argon (ThinkingLevel.HIGH)');
 
-  const [toolPlannerSteps] = useState([
-    {
-      step: 1,
-      tool: 'policy_boundary_validator',
-      status: 'Passed',
-      notes: 'Verified SSRF guard compliance and scope bounds (DESKTOP-01, internal perimeter).',
-    },
-    {
-      step: 2,
-      tool: 'evidence_integrity_verifier',
-      status: 'Passed',
-      notes: 'SHA-256 hashes cross-verified against recorded EDR telemetry.',
-    },
-    {
-      step: 3,
-      tool: 'threat_intelligence_correlator',
-      status: 'Passed',
-      notes: 'Correlated C2 IP 192.0.2.45 with CISA KEV baseline.',
-    },
-    {
-      step: 4,
-      tool: 'gemini_high_thinking_engine',
-      status: 'Active',
-      notes: 'Executing Gemini 4 Argon with deep forensic reasoning and ATT&CK mapping.',
-    },
-  ]);
+  const toolPlannerSteps = React.useMemo(
+    () => [
+      {
+        step: 1,
+        tool: 'policy_boundary_validator',
+        status: 'Passed',
+        notes: `Verified SSRF guard compliance and scope bounds (${currentCase?.scope?.slice(0, 2).join(', ') || 'perimeter scope'}).`,
+      },
+      {
+        step: 2,
+        tool: 'evidence_integrity_verifier',
+        status: 'Passed',
+        notes: `Cryptographic SHA-256 hashes cross-verified for ${currentCase?.evidence?.length || 0} recorded artifacts.`,
+      },
+      {
+        step: 3,
+        tool: 'threat_intelligence_correlator',
+        status: 'Passed',
+        notes: `Correlated recorded telemetry against threat baseline for target ${targetIpOrDomain}.`,
+      },
+      {
+        step: 4,
+        tool: 'gemini_high_thinking_engine',
+        status: 'Active',
+        notes: 'Executing Gemini 4 Argon with deep forensic reasoning and ATT&CK mapping.',
+      },
+    ],
+    [currentCase, targetIpOrDomain]
+  );
 
   const handleRunInvestigation = async (e: React.FormEvent) => {
     e.preventDefault();

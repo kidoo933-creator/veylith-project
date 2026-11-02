@@ -12,6 +12,8 @@ import {
   Sparkles,
 } from 'lucide-react';
 
+import { getAnalystProfile } from '../utils/storage';
+
 interface NavbarProps {
   currentTab: ViewTab;
   onNavigate: (tab: ViewTab) => void;
@@ -32,6 +34,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onSearchChange,
   onNavigate,
 }) => {
+  const analystProfile = getAnalystProfile();
+
   return (
     <header className="h-16 px-4 md:px-6 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-4 sticky top-0 z-30 transition-colors">
       {/* Brand & Mobile Hamburger */}
@@ -148,13 +152,28 @@ export const Navbar: React.FC<NavbarProps> = ({
         </button>
 
         {/* Analyst Profile */}
-        <div className="flex items-center gap-2 pl-1 border-l border-slate-200 dark:border-slate-800">
+        <div
+          onClick={() => onNavigate('settings')}
+          className="flex items-center gap-2 pl-1 border-l border-slate-200 dark:border-slate-800 cursor-pointer hover:opacity-85 transition"
+          title="Analyst Profile & Settings"
+        >
           <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-teal-600 to-blue-600 flex items-center justify-center text-white font-semibold text-xs shadow-xs">
-            AC
+            {analystProfile.callsign ||
+              analystProfile.name
+                .split(' ')
+                .map((n) => n[0])
+                .join('')
+                .slice(0, 2)
+                .toUpperCase() ||
+              'SA'}
           </div>
           <div className="hidden xl:block text-left">
-            <p className="text-xs font-semibold text-slate-900 dark:text-white leading-tight">Alex Carter</p>
-            <p className="text-[10px] text-slate-500 dark:text-slate-400">Security Analyst</p>
+            <p className="text-xs font-semibold text-slate-900 dark:text-white leading-tight">
+              {analystProfile.name}
+            </p>
+            <p className="text-[10px] text-slate-500 dark:text-slate-400">
+              {analystProfile.role}
+            </p>
           </div>
         </div>
       </div>

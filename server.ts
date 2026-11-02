@@ -29,55 +29,12 @@ const ai = new GoogleGenAI({
   },
 });
 
-// SSRF Protection Helpers
-function isPrivateOrReservedIP(ip: string): { isBlocked: boolean; reason?: string } {
-  // IPv4 checks
-  const v4Parts = ip.split('.').map(Number);
-  if (v4Parts.length === 4 && v4Parts.every((p) => !isNaN(p) && p >= 0 && p <= 255)) {
-    const [b0, b1] = v4Parts;
-    if (b0 === 0) return { isBlocked: true, reason: 'Current network (0.0.0.0/8) is restricted' };
-    if (b0 === 10) return { isBlocked: true, reason: 'Private Class A address (10.0.0.0/8) is restricted' };
-    if (b0 === 127) return { isBlocked: true, reason: 'Loopback address (127.0.0.0/8) is restricted' };
-    if (b0 === 169 && b1 === 254) return { isBlocked: true, reason: 'Link-local / Cloud Metadata (169.254.0.0/16) is restricted' };
-    if (b0 === 172 && b1 >= 16 && b1 <= 31) return { isBlocked: true, reason: 'Private Class B address (172.16.0.0/12) is restricted' };
-    if (b0 === 192 && b1 === 168) return { isBlocked: true, reason: 'Private Class C address (192.168.0.0/16) is restricted' };
-    if (b0 === 100 && b1 >= 64 && b1 <= 127) return { isBlocked: true, reason: 'Carrier-grade NAT (100.64.0.0/10) is restricted' };
-    if (b0 >= 224 && b0 <= 239) return { isBlocked: true, reason: 'Multicast address range is restricted' };
-    if (b0 >= 240) return { isBlocked: true, reason: 'Reserved address range is restricted' };
-  }
-
-  // IPv6 checks
-  const normV6 = ip.toLowerCase();
-  if (
-    normV6 === '::1' ||
-    normV6 === '::' ||
-    normV6.startsWith('fe80:') || // link-local
-    normV6.startsWith('fc00:') || // unique local
-    normV6.startsWith('fd00:') ||
-    normV6.startsWith('ff00:') // multicast
-  ) {
-    return { isBlocked: true, reason: `IPv6 restricted range (${normV6})` };
-  }
-
-  return { isBlocked: false };
-}
-
-function validateHostname(hostname: string): { isValid: boolean; error?: string } {
-  const clean = hostname.trim().toLowerCase();
-  if (!clean) return { isValid: false, error: 'Target hostname cannot be empty' };
-  if (clean === 'localhost' || clean.endsWith('.local') || clean.endsWith('.internal') || clean.includes('metadata.google')) {
-    return { isValid: false, error: 'Restricted target domain (localhost / cloud internal)' };
-  }
-  const ipCheck = isPrivateOrReservedIP(clean);
-  if (ipCheck.isBlocked) {
-    return { isValid: false, error: ipCheck.reason };
-  }
-  // Disallow characters that aren't domain or IPv4/IPv6 valid
-  if (!/^[a-zA-Z0-9.-]+$/.test(clean) && !clean.includes(':')) {
-    return { isValid: false, error: 'Malformed hostname characters' };
-  }
-  return { isValid: true };
-}
+import { runDomainInvestigation, isPrivateOrReservedIP, validateHostname } from './server/domainEngine.ts';
+import {
+  buildDomainAnalystPrompt,
+  validateAiDomainAnalysis,
+  generateDeterministicDomainAnalysis,
+} from './src/utils/domainAiAnalyst.ts';
 
 // Health and Status API
 app.get('/api/health', (req, res) => {
@@ -90,348 +47,146 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Domain Intelligence API with SSRF Protections
+// Domain Intelligence API with SSRF Protections & Deep Recon Engine
 app.post('/api/domain/investigate', async (req, res) => {
   const { target } = req.body;
   if (!target || typeof target !== 'string') {
     return res.status(400).json({ error: 'Target domain or URL is required' });
   }
 
-  let hostname = target.trim();
   try {
-    const toParse = hostname.includes('://') ? hostname : `https://${hostname}`;
-    const parsed = new URL(toParse);
-    hostname = parsed.hostname;
-  } catch {
-    // Keep as-is if raw hostname
-  }
-
-  const hostValidation = validateHostname(hostname);
-  if (!hostValidation.isValid) {
-    return res.status(400).json({
-      error: `SSRF Policy Violation: ${hostValidation.error}`,
-      target: hostname,
-      securityBlocked: true,
-    });
-  }
-
-  const report: {
-    domain: string;
-    resolvedIps: { ip: string; version: number }[];
-    dnsRecords: {
-      a: string[];
-      aaaa: string[];
-      mx: { exchange: string; priority: number }[];
-      txt: string[][];
-      ns: string[];
-    };
-    tlsCertificate?: {
-      valid: boolean;
-      subject?: string;
-      issuer?: string;
-      validFrom?: string;
-      validTo?: string;
-      daysRemaining?: number;
-      protocol?: string;
-      cipher?: string;
-    };
-    httpProbe?: {
-      statusCode?: number;
-      statusText?: string;
-      redirectChain: string[];
-      securityHeaders: Record<string, string | null>;
-      missingSecurityHeaders: string[];
-      serverBanner?: string;
-      contentLength?: number;
-    };
-    rdap?: any;
-    uncompletedChecks: string[];
-    riskScore: number;
-    riskLevel: 'Low' | 'Medium' | 'High' | 'Critical';
-    riskFactors: string[];
-  } = {
-    domain: hostname,
-    resolvedIps: [],
-    dnsRecords: { a: [], aaaa: [], mx: [], txt: [], ns: [] },
-    uncompletedChecks: [],
-    riskScore: 0,
-    riskLevel: 'Low',
-    riskFactors: [],
-  };
-
-  // Step 1: DNS Resolution with SSRF checks
-  try {
-    const [aRecords, aaaaRecords] = await Promise.allSettled([
-      dns.resolve4(hostname),
-      dns.resolve6(hostname),
-    ]);
-
-    if (aRecords.status === 'fulfilled') {
-      report.dnsRecords.a = aRecords.value;
-      for (const ip of aRecords.value) {
-        const check = isPrivateOrReservedIP(ip);
-        if (check.isBlocked) {
-          return res.status(403).json({
-            error: `SSRF Blocked: Domain ${hostname} resolves to prohibited IP ${ip} (${check.reason})`,
-            securityBlocked: true,
-            resolvedProhibitedIp: ip,
-          });
-        }
-        report.resolvedIps.push({ ip, version: 4 });
-      }
+    const result = await runDomainInvestigation(target);
+    if (!result.success) {
+      return res.status(result.securityBlocked ? 403 : 400).json({
+        error: result.error,
+        target: result.target,
+        securityBlocked: result.securityBlocked,
+        resolvedProhibitedIp: result.resolvedProhibitedIp,
+      });
     }
 
-    if (aaaaRecords.status === 'fulfilled') {
-      report.dnsRecords.aaaa = aaaaRecords.value;
-      for (const ip of aaaaRecords.value) {
-        const check = isPrivateOrReservedIP(ip);
-        if (check.isBlocked) {
-          return res.status(403).json({
-            error: `SSRF Blocked: Domain ${hostname} resolves to prohibited IPv6 ${ip} (${check.reason})`,
-            securityBlocked: true,
-            resolvedProhibitedIp: ip,
-          });
-        }
-        report.resolvedIps.push({ ip, version: 6 });
-      }
-    }
-  } catch (err: any) {
-    report.uncompletedChecks.push(`DNS A/AAAA resolution failed: ${err.message || err}`);
-  }
+    const report = result.report;
 
-  // MX, TXT, NS
-  const [mxRes, txtRes, nsRes] = await Promise.allSettled([
-    dns.resolveMx(hostname),
-    dns.resolveTxt(hostname),
-    dns.resolveNs(hostname),
-  ]);
-
-  if (mxRes.status === 'fulfilled') report.dnsRecords.mx = mxRes.value;
-  else report.uncompletedChecks.push('MX records not present or unresolvable');
-
-  if (txtRes.status === 'fulfilled') report.dnsRecords.txt = txtRes.value;
-  else report.uncompletedChecks.push('TXT records not present or unresolvable');
-
-  if (nsRes.status === 'fulfilled') report.dnsRecords.ns = nsRes.value;
-  else report.uncompletedChecks.push('NS records not present or unresolvable');
-
-  // Step 2: TLS Inspection (safe socket connect with explicit timer)
-  await new Promise<void>((resolve) => {
-    let finished = false;
-    const finish = () => {
-      if (!finished) {
-        finished = true;
-        clearTimeout(timer);
-        resolve();
-      }
-    };
-
-    const timer = setTimeout(() => {
-      report.uncompletedChecks.push('HTTPS Port 443 connection timed out (3500ms)');
+    // If Gemini API is available, attempt dynamic enhancement with strict fallback
+    if (process.env.GEMINI_API_KEY && report) {
       try {
-        socket.destroy();
-      } catch {}
-      finish();
-    }, 3500);
-
-    const socket = tls.connect(
-      {
-        host: hostname,
-        port: 443,
-        servername: hostname,
-        rejectUnauthorized: false,
-      },
-      () => {
+        const { systemPrompt, userPrompt } = buildDomainAnalystPrompt(report);
+        let aiResponse: any = null;
         try {
-          const cert = socket.getPeerCertificate(true);
-          const protocol = socket.getProtocol();
-          const cipher = socket.getCipher();
+          aiResponse = await Promise.race([
+            ai.models.generateContent({
+              model: 'gemini-3.8-flash',
+              contents: userPrompt,
+              config: {
+                systemInstruction: systemPrompt,
+                responseMimeType: 'application/json',
+              },
+            }),
+            new Promise<null>((_, reject) =>
+              setTimeout(() => reject(new Error('AI inference timeout')), 4500)
+            ),
+          ]);
+        } catch {
+          // Fast fallback to gemini-3.1-flash-lite
+          try {
+            aiResponse = await ai.models.generateContent({
+              model: 'gemini-3.1-flash-lite',
+              contents: userPrompt,
+              config: {
+                systemInstruction: systemPrompt,
+                responseMimeType: 'application/json',
+              },
+            });
+          } catch {}
+        }
 
-          if (cert && Object.keys(cert).length > 0) {
-            const validTo = new Date(cert.valid_to);
-            const now = new Date();
-            const daysRemaining = Math.round((validTo.getTime() - now.getTime()) / (1000 * 3600 * 24));
-            const isValid = daysRemaining > 0 && socket.authorized;
-
-            const formatCertField = (field: any): string => {
-              if (!field) return '';
-              if (Array.isArray(field)) return field.join(', ');
-              if (typeof field === 'object') return Object.entries(field).map(([k, v]) => `${k}=${v}`).join(', ');
-              return String(field);
-            };
-
-            report.tlsCertificate = {
-              valid: isValid,
-              subject: typeof cert.subject === 'object' ? formatCertField(cert.subject.CN || cert.subject) : String(cert.subject),
-              issuer: typeof cert.issuer === 'object' ? formatCertField(cert.issuer.O || cert.issuer.CN || cert.issuer) : String(cert.issuer),
-              validFrom: cert.valid_from,
-              validTo: cert.valid_to,
-              daysRemaining,
-              protocol: protocol || 'Unknown',
-              cipher: cipher?.name,
-            };
-
-            if (!isValid) {
-              report.riskScore += 25;
-              report.riskFactors.push('Invalid or untrusted TLS certificate');
+        if (aiResponse && (aiResponse as any).text) {
+          try {
+            const parsed = JSON.parse((aiResponse as any).text);
+            const validated = validateAiDomainAnalysis(parsed, report);
+            if (validated) {
+              report.aiSecurityAnalysis = validated;
             }
-            if (daysRemaining < 14 && daysRemaining > 0) {
-              report.riskFactors.push(`TLS certificate expiring soon (${daysRemaining} days)`);
-            }
+          } catch {
+            // keep existing deterministic analysis
           }
-        } catch (e: any) {
-          report.uncompletedChecks.push(`TLS certificate parsing error: ${e.message}`);
         }
-        try {
-          socket.destroy();
-        } catch {}
-        finish();
+      } catch (aiErr) {
+        // Deterministic analysis is already attached by domainEngine
       }
-    );
-
-    socket.on('error', (err) => {
-      report.uncompletedChecks.push(`HTTPS Port 443 handshake failed: ${err.message}`);
-      try {
-        socket.destroy();
-      } catch {}
-      finish();
-    });
-  });
-
-  // Step 3: Safe HTTP Probe & Security Headers Inspection
-  try {
-    const probeResult = await performSafeHttpProbe(hostname);
-    report.httpProbe = probeResult;
-
-    if (probeResult.missingSecurityHeaders.includes('Strict-Transport-Security')) {
-      report.riskScore += 10;
-      report.riskFactors.push('Missing HSTS (Strict-Transport-Security) header');
     }
-    if (probeResult.missingSecurityHeaders.includes('Content-Security-Policy')) {
-      report.riskScore += 10;
-      report.riskFactors.push('Missing Content-Security-Policy (CSP)');
-    }
-    if (probeResult.serverBanner && /(Apache\/2\.2|nginx\/1\.0|IIS\/6\.0)/i.test(probeResult.serverBanner)) {
-      report.riskScore += 20;
-      report.riskFactors.push(`Outdated server banner identified: ${probeResult.serverBanner}`);
-    }
+
+    return res.json(report);
   } catch (err: any) {
-    report.uncompletedChecks.push(`HTTP probe failed: ${err.message}`);
-  }
-
-  // Step 4: RDAP Lookup (Public Registry Data) with strict 3s timeout
-  try {
-    const rdapRes = await fetch(`https://rdap.org/domain/${encodeURIComponent(hostname)}`, {
-      headers: { 'User-Agent': 'Veylith-DFIR/1.0' },
-      signal: AbortSignal.timeout(3000),
+    return res.status(500).json({
+      error: `Internal domain investigation error: ${err.message || err}`,
     });
-    if (rdapRes.ok) {
-      const data = await rdapRes.json();
-      report.rdap = {
-        handle: data.handle,
-        status: data.status,
-        port43: data.port43,
-        events: data.events?.map((e: any) => ({ action: e.eventAction, date: e.eventDate })),
-        entities: data.entities?.map((e: any) => ({ roles: e.roles, handle: e.handle })),
-      };
-    } else {
-      report.uncompletedChecks.push(`RDAP registry query returned HTTP ${rdapRes.status}`);
-    }
-  } catch (err: any) {
-    report.uncompletedChecks.push(`RDAP lookup unavailable: ${err.message}`);
   }
-
-  // Calculate final Risk Classification
-  if (report.riskScore >= 75) report.riskLevel = 'Critical';
-  else if (report.riskScore >= 50) report.riskLevel = 'High';
-  else if (report.riskScore >= 25) report.riskLevel = 'Medium';
-  else report.riskLevel = 'Low';
-
-  return res.json(report);
 });
 
-async function performSafeHttpProbe(hostname: string): Promise<any> {
-  const protocol = 'https:';
-  const url = `${protocol}//${hostname}/`;
+// Dedicated On-Demand AI Domain Security Analysis API Endpoint
+app.post('/api/domain/ai-analysis', async (req, res) => {
+  const { report } = req.body;
+  if (!report || !report.domain) {
+    return res.status(400).json({ error: 'Valid domain analysis report is required' });
+  }
 
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (result: any) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timeoutTimer);
-        resolve(result);
-      }
-    };
-    const fail = (err: any) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timeoutTimer);
-        reject(err);
-      }
-    };
-
-    const timeoutTimer = setTimeout(() => {
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const { systemPrompt, userPrompt } = buildDomainAnalystPrompt(report);
+      let aiResponse: any = null;
+      let modelUsed = 'gemini-3.8-flash';
       try {
-        req.destroy();
-      } catch {}
-      fail(new Error('Connection timed out (3500ms)'));
-    }, 3500);
-
-    const req = https.get(
-      url,
-      {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; VeylithSecurityProbe/1.0)',
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        },
-      },
-      (res) => {
-        const headers = res.headers;
-        const securityHeaders = {
-          'Strict-Transport-Security': (headers['strict-transport-security'] as string) || null,
-          'Content-Security-Policy': (headers['content-security-policy'] as string) || null,
-          'X-Frame-Options': (headers['x-frame-options'] as string) || null,
-          'X-Content-Type-Options': (headers['x-content-type-options'] as string) || null,
-          'Referrer-Policy': (headers['referrer-policy'] as string) || null,
-          'Permissions-Policy': (headers['permissions-policy'] as string) || null,
-        };
-
-        const missing = Object.entries(securityHeaders)
-          .filter(([_, val]) => !val)
-          .map(([key]) => key);
-
-        let dataLen = 0;
-        res.on('data', (chunk) => {
-          dataLen += chunk.length;
-          // Impose strict response limit (256KB)
-          if (dataLen > 262144) {
-            res.destroy();
-          }
+        aiResponse = await ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: userPrompt,
+          config: {
+            systemInstruction: systemPrompt,
+            responseMimeType: 'application/json',
+          },
         });
-
-        const complete = () => {
-          finish({
-            statusCode: res.statusCode,
-            statusText: res.statusMessage,
-            redirectChain: [url],
-            securityHeaders,
-            missingSecurityHeaders: missing,
-            serverBanner: (headers['server'] as string) || undefined,
-            contentLength: dataLen,
-          });
-        };
-
-        res.on('end', complete);
-        res.on('close', complete);
+      } catch {
+        aiResponse = await ai.models.generateContent({
+          model: 'gemini-3.1-flash-lite',
+          contents: userPrompt,
+          config: {
+            systemInstruction: systemPrompt,
+            responseMimeType: 'application/json',
+          },
+        });
+        modelUsed = 'gemini-3.1-flash-lite';
       }
-    );
 
-    req.on('error', (err) => {
-      fail(err);
-    });
+      if (aiResponse && aiResponse.text) {
+        try {
+          const parsed = JSON.parse(aiResponse.text);
+          const validated = validateAiDomainAnalysis(parsed, report);
+          if (validated) {
+            return res.json({
+              success: true,
+              isAiGenerated: true,
+              model: `Gemini (${modelUsed})`,
+              analysis: validated,
+            });
+          }
+        } catch {
+          // JSON parsing failed, fallback
+        }
+      }
+    } catch (err: any) {
+      console.warn('Gemini Domain Analysis fallback to deterministic engine:', err?.message || err);
+    }
+  }
+
+  // Deterministic DFIR Expert Engine fallback
+  const fallbackAnalysis = generateDeterministicDomainAnalysis(report);
+  return res.json({
+    success: true,
+    isAiGenerated: false,
+    model: 'Veylith Deterministic DFIR Expert Engine',
+    analysis: fallbackAnalysis,
   });
-}
+});
 
 // CISA KEV & Vulnerability Intelligence Catalog API
 let cveCache: any[] = [];
@@ -640,29 +395,26 @@ ${JSON.stringify(evidenceItems || [], null, 2)}
 
 Provide an authoritative, defensible investigation analysis.`;
 
+    const targetModel = 'gemini-3.8-flash';
     const response = await ai.models.generateContent({
-      model: 'gemini-4-argon',
+      model: targetModel,
       contents: userPromptText,
       config: {
         systemInstruction: systemPrompt,
-        thinkingConfig: {
-          thinkingLevel: ThinkingLevel.HIGH,
-        },
       },
     });
 
     res.json({
       success: true,
-      model: 'gemini-4-argon (ThinkingLevel.HIGH)',
+      model: targetModel,
       timestamp: new Date().toISOString(),
       analysis: response.text,
     });
   } catch (err: any) {
     console.error('Gemini Investigation Error:', err);
-    // If gemini-4-argon is unavailable (e.g. key permissions), try fallback to gemini-3.8-flash
     try {
       const fallbackResponse = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
+        model: 'gemini-3.1-flash-lite',
         contents: `Objective: ${objective}. Evidence: ${JSON.stringify(evidenceItems)}. Analyze defensively.`,
         config: {
           systemInstruction: 'You are Veylith DFIR investigation assistant.',
@@ -670,19 +422,19 @@ Provide an authoritative, defensible investigation analysis.`;
       });
       return res.json({
         success: true,
-        model: 'gemini-3.8-flash (Standard Fallback)',
+        model: 'gemini-3.1-flash-lite',
         timestamp: new Date().toISOString(),
         analysis: fallbackResponse.text,
       });
     } catch (fallbackErr: any) {
       const notice = err?.message?.includes('429')
-        ? 'Gemini 4 Argon quota limit reached. Deterministic forensics synthesis activated.'
-        : `Gemini API reported: ${err?.message || 'High Demand (503)'}. Deterministic forensics synthesis activated.`;
+        ? 'Gemini quota limit reached. Deterministic forensics synthesis activated.'
+        : `Gemini API reported: ${err?.message || 'Offline / Standalone mode'}. Deterministic forensics synthesis activated.`;
 
       return res.json({
         success: true,
         isFallback: true,
-        model: 'Veylith Deterministic Engine (Offline / Safe Mode)',
+        model: 'Veylith Deterministic DFIR Engine (Offline / Standalone)',
         providerNotice: notice,
         timestamp: new Date().toISOString(),
         analysis: generateDeterministicInvestigationSummary(objective, scope, evidenceItems, notice),
@@ -693,28 +445,23 @@ Provide an authoritative, defensible investigation analysis.`;
 
 // Multi-Turn Gemini Forensics Chat API
 app.post('/api/gemini/chat', async (req, res) => {
-  const { messages, roleId, modelPreference, activeCase } = req.body;
+  const { messages, roleId, modelPreference, activeCase, investigationContext } = req.body;
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'Messages array is required.' });
   }
 
-  // Model selection per user specification:
-  // - gemini-4-argon for particularly complex tasks
-  // - gemini-3.8-flash for general tasks
-  // - gemini-3.1-flash-lite for tasks that should happen fast
+  // Model selection per @google/genai guidelines:
+  // - gemini-3.8-flash for general tasks (default)
+  // - gemini-3.1-flash-lite for fast triage
+  // - gemini-4-argon for complex tasks (if supported/requested)
   let selectedModel = 'gemini-3.8-flash';
-  if (modelPreference === 'gemini-4-argon') {
-    selectedModel = 'gemini-4-argon';
-  } else if (modelPreference === 'gemini-3.1-flash-lite') {
+  if (modelPreference === 'gemini-3.1-flash-lite') {
     selectedModel = 'gemini-3.1-flash-lite';
-  } else if (modelPreference === 'gemini-3.8-flash') {
-    selectedModel = 'gemini-3.8-flash';
+  } else if (modelPreference === 'gemini-4-argon') {
+    selectedModel = 'gemini-4-argon';
   } else {
-    // Role-based defaults
-    if (roleId === 'lead_investigator') selectedModel = 'gemini-4-argon';
-    else if (roleId === 'reverse_engineer') selectedModel = 'gemini-3.1-flash-lite';
-    else selectedModel = 'gemini-3.8-flash';
+    selectedModel = 'gemini-3.8-flash';
   }
 
   // Define role-specific system instructions
@@ -726,7 +473,8 @@ Guidelines:
 - Ground answers strictly in verifiable facts and the current case evidence.
 - Distinguish between OBSERVED facts, CONFIRMED indicators, INFERRED hypotheses, POTENTIAL risks, and UNKNOWN data.
 - Map threat activity to MITRE ATT&CK techniques where evidence supports it.
-- Never claim a feature, scan, or finding exists unless provided in evidence.`;
+- Never claim a feature, scan, or finding exists unless provided in evidence.
+- Provide concrete remediation commands (e.g. curl verification, Nginx/Apache configs) when requested.`;
   } else if (roleId === 'reverse_engineer') {
     systemInstruction = `You are a Senior Static File & Reverse Engineering Advisor within Veylith.
 Your role: Provide rapid, razor-sharp technical triage on file headers, magic bytes, PE/ELF/Mach-O sections, entropy distributions, Android APK structures, and extracted strings.
@@ -737,15 +485,16 @@ Guidelines:
 - Always maintain Veylith's strict non-execution principle: files are never dynamically executed.
 - Provide fast, precise, actionable guidance.`;
   } else {
-    systemInstruction = `You are a Senior Threat Intelligence & Attribution Analyst within Veylith.
-Your role: Correlate observables (IPs, domains, hashes, CVEs) with known adversary tactics, CISA Known Exploited Vulnerabilities (KEV), and campaign patterns.
+    systemInstruction = `You are a Senior Threat Intelligence & Infrastructure Hardening Analyst within Veylith.
+Your role: Correlate observables (IPs, domains, hashes, CVEs) with known adversary tactics, CISA Known Exploited Vulnerabilities (KEV), and web infrastructure hardening.
 Guidelines:
 - Contextualize domains, ASN infrastructure, bulletproof hosts, and known exploitation vectors.
-- Cite relevant CVE IDs and vendor mitigations based on verified intelligence.
+- Provide concrete server hardening configuration snippets for Nginx, Apache, Express, and Cloudflare when requested.
+- Supply exact curl verification commands (e.g. curl -I https://domain | grep -i header).
 - Help the analyst prioritize indicators for firewall/EDR blocklisting.`;
   }
 
-  // Include active case context if provided
+  // Include active case and investigation context if provided
   if (activeCase) {
     systemInstruction += `\n\nCURRENT ACTIVE INVESTIGATION CONTEXT:
 Case ID: ${activeCase.id || 'N/A'}
@@ -755,6 +504,11 @@ Recorded Evidence Items:
 ${JSON.stringify(activeCase.evidence || [], null, 2)}
 Recorded Findings:
 ${JSON.stringify(activeCase.findings || [], null, 2)}`;
+  }
+
+  if (investigationContext) {
+    systemInstruction += `\n\nACTIVE SCAN CONTEXT:
+${JSON.stringify(investigationContext, null, 2)}`;
   }
 
   // Format messages into Gemini contents structure
@@ -767,8 +521,8 @@ ${JSON.stringify(activeCase.findings || [], null, 2)}`;
     return res.status(200).json({
       success: true,
       isFallback: true,
-      modelUsed: 'Veylith Deterministic DFIR Advisor (Offline)',
-      reply: generateDeterministicChatReply(messages, roleId, activeCase),
+      modelUsed: 'Veylith Deterministic DFIR Engine (Offline Fallback)',
+      reply: generateDeterministicChatReply(messages, roleId, activeCase, investigationContext),
     });
   }
 
@@ -794,17 +548,15 @@ ${JSON.stringify(activeCase.findings || [], null, 2)}`;
     });
   } catch (err: any) {
     console.error('Gemini Chat Error with model', selectedModel, err);
-    // Graceful fallback to gemini-3.8-flash or gemini-3.1-flash-lite
     try {
-      const fallbackModel = selectedModel === 'gemini-4-argon' ? 'gemini-3.8-flash' : 'gemini-3.1-flash-lite';
       const fallbackResponse = await ai.models.generateContent({
-        model: fallbackModel,
+        model: 'gemini-3.8-flash',
         contents,
         config: { systemInstruction },
       });
       return res.json({
         success: true,
-        modelUsed: `${fallbackModel} (Automatic Resiliency Fallback)`,
+        modelUsed: 'gemini-3.8-flash (Resiliency Fallback)',
         timestamp: new Date().toISOString(),
         reply: fallbackResponse.text,
       });
@@ -813,40 +565,154 @@ ${JSON.stringify(activeCase.findings || [], null, 2)}`;
       return res.json({
         success: true,
         isFallback: true,
-        modelUsed: 'Veylith Deterministic DFIR Engine',
-        reply: generateDeterministicChatReply(messages, roleId, activeCase),
+        modelUsed: 'Veylith Deterministic DFIR Engine (Offline Fallback)',
+        reply: generateDeterministicChatReply(messages, roleId, activeCase, investigationContext),
       });
     }
   }
 });
 
-function generateDeterministicChatReply(messages: any[], roleId?: string, activeCase?: any): string {
-  const lastUserMsg = messages[messages.length - 1]?.content || '';
+function generateDeterministicChatReply(
+  messages: any[],
+  roleId?: string,
+  activeCase?: any,
+  investigationContext?: any
+): string {
+  const lastUserMsg = (messages[messages.length - 1]?.content || '').toLowerCase();
   const evidenceCount = activeCase?.evidence?.length || 0;
   const caseId = activeCase?.id || 'Active Investigation';
+  const targetDomain = investigationContext?.domain || 'example.com';
 
-  if (lastUserMsg.toLowerCase().includes('entropy')) {
+  // 1. Web Server Hardening & Configuration Queries
+  if (lastUserMsg.includes('nginx') || (lastUserMsg.includes('header') && lastUserMsg.includes('config'))) {
+    return `### Nginx Security Hardening Directives
+
+To enforce baseline browser security boundaries in Nginx, add the following headers to your server block in \`/etc/nginx/conf.d/security.conf\` (or \`/etc/nginx/sites-available/default\`):
+
+\`\`\`nginx
+# Security Hardening Directives
+add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self';" always;
+add_header X-Frame-Options "SAMEORIGIN" always;
+add_header X-Content-Type-Options "nosniff" always;
+add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+\`\`\`
+
+**Verification Command**:
+\`\`\`bash
+nginx -t && systemctl reload nginx
+curl -I https://${targetDomain} | grep -Ei "content-security-policy|x-frame-options|x-content-type-options|strict-transport-security"
+\`\`\`
+
+*Analyst Note*: Verify that HTTPS functions across all subdomains prior to enabling \`includeSubDomains\` on HSTS.`;
+  }
+
+  if (lastUserMsg.includes('apache')) {
+    return `### Apache HTTP Server Hardening Directives
+
+Add the following to \`/etc/apache2/conf-available/security.conf\` or your site's \`.htaccess\` file (requires \`mod_headers\`):
+
+\`\`\`apache
+<IfModule mod_headers.c>
+  Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; object-src 'none';"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+  Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+</IfModule>
+\`\`\`
+
+**Verification**:
+\`\`\`bash
+a2enmod headers && systemctl restart apache2
+curl -I https://${targetDomain}
+\`\`\``;
+  }
+
+  if (lastUserMsg.includes('curl') || lastUserMsg.includes('verify')) {
+    return `### Live Forensic Verification Commands
+
+Use these defensible \`curl\` commands to inspect response headers and TLS certificates without rendering browser DOM:
+
+\`\`\`bash
+# 1. Inspect HTTP Headers and Status Codes
+curl -I -sS -L https://${targetDomain}
+
+# 2. Filter for Security Hardening Headers specifically
+curl -I https://${targetDomain} 2>&1 | grep -Ei "strict-transport-security|content-security-policy|x-frame-options|x-content-type-options|referrer-policy|permissions-policy|server"
+
+# 3. Test for SSL/TLS Protocol and Certificate Expiration
+openssl s_client -connect ${targetDomain}:443 -servername ${targetDomain} < /dev/null 2>/dev/null | openssl x509 -noout -dates -issuer -subject
+
+# 4. Check DNS Authoritative Records
+dig +short ${targetDomain} A && dig +short ${targetDomain} AAAA
+\`\`\``;
+  }
+
+  // 2. Attack Scenarios & Risk Explanations
+  if (lastUserMsg.includes('attack') || lastUserMsg.includes('scenario') || lastUserMsg.includes('clickjack') || lastUserMsg.includes('xss')) {
+    return `### Educational Attack Scenario Analysis
+
+#### 1. Clickjacking (Absence of X-Frame-Options / CSP frame-ancestors)
+- **Mechanism**: An adversary creates a deceptive website (\`attacker.example\`) that embeds \`${targetDomain}\` inside a transparent iframe overlaying an enticing UI element (e.g. "Play Video" or "Claim Voucher").
+- **Impact**: When the authenticated user clicks, the click is intercepted by a sensitive button on the embedded site (e.g. "Authorize Transfer" or "Delete Account").
+- **Mitigation**: \`X-Frame-Options: SAMEORIGIN\` or CSP \`frame-ancestors 'self'\`.
+
+#### 2. Cross-Site Scripting (XSS) Amplification (Absence of CSP)
+- **Mechanism**: If an injection flaw exists in input forms, the lack of CSP permits injected JavaScript to execute and load remote scripts from adversary C2 servers.
+- **Mitigation**: Strict \`Content-Security-Policy\` restricting script sources to \`'self'\` and forbidding inline evaluation.
+
+#### 3. SSL Stripping (Absence of HSTS)
+- **Mechanism**: An adversary on local Wi-Fi intercepts the user's initial plaintext \`http://\` request, serving a spoofed plaintext page before the HTTPS redirect finishes.
+- **Mitigation**: Enforce \`Strict-Transport-Security\` with a 1-year duration (\`max-age=31536000\`).`;
+  }
+
+  // 3. Shannon Entropy & Reverse Engineering
+  if (lastUserMsg.includes('entropy') || lastUserMsg.includes('packer') || lastUserMsg.includes('packed')) {
     return `### Shannon Entropy Forensic Analysis
-- **Definition**: Shannon entropy measures the unpredictability of byte distributions from 0.000 to 8.000 bits per byte.
-- **Interpretation**: Values >7.2 indicate high compression or cryptographic encryption (often associated with packers like UPX/Themida or payload obfuscation).
-- **Caveat & False Positives**: Normal compressed files (ZIP, PNG, MP4, JPEG) naturally exhibit entropy >7.2. High entropy alone is NEVER proof of malware. Always correlate with magic bytes and file extension alignment.`;
+- **Definition**: Shannon entropy measures byte unpredictability from 0.000 to 8.000 bits per byte.
+- **Diagnostic Thresholds**:
+  - \`0.00 - 3.00\`: Highly uniform data (sparse files, zero-filled buffers, ASCII text).
+  - \`3.00 - 6.50\`: Typical compiled code (PE x86/x64 opcodes, ELF sections, uncompressed scripts).
+  - \`7.20 - 8.00\`: High randomness (encrypted data or compressed blocks).
+- **Forensic Caveat**: Legitimate compressed formats (ZIP, PNG, JPEG, MP4) naturally show entropy >7.5. High entropy alone is NEVER conclusive proof of malicious intent. Correlate entropy with file extension, PE section names (\`.upx\`, \`.themida\`), and import table scarcity.`;
   }
 
-  if (lastUserMsg.toLowerCase().includes('apk') || lastUserMsg.toLowerCase().includes('android')) {
+  // 4. Android APK Forensics
+  if (lastUserMsg.includes('apk') || lastUserMsg.includes('android')) {
     return `### Android APK Static Triage Overview
-- **Structure**: APK files are ZIP containers containing \`AndroidManifest.xml\`, \`classes.dex\`, resources, and native libraries in \`lib/\`.
-- **Sensitive Permissions to Review**:
-  - \`SYSTEM_ALERT_WINDOW\`: Allows drawing screen overlays (credential harvesting risk).
-  - \`READ_SMS\` / \`SEND_SMS\`: Risk of 2FA/OTP interception.
-  - \`REQUEST_INSTALL_PACKAGES\`: Secondary dropper indicator.
-  - \`RECORD_AUDIO\` / \`CAMERA\`: Unauthorized surveillance risk.
-- **Defensive Check**: Verify whether \`android:debuggable="true"\` is left enabled, which permits arbitrary runtime debugger attachments.`;
+- **Structure**: APK packages are ZIP archives containing \`AndroidManifest.xml\`, \`classes.dex\`, resources, and native \`lib/\` binaries.
+- **High-Risk Permission Flags**:
+  - \`SYSTEM_ALERT_WINDOW\`: Screen overlays enabling deceptive credential harvesting.
+  - \`READ_SMS\` / \`SEND_SMS\`: Interception of banking OTP and 2FA SMS tokens.
+  - \`REQUEST_INSTALL_PACKAGES\`: Secondary payload dropper mechanism.
+  - \`RECORD_AUDIO\` / \`ACCESS_FINE_LOCATION\`: Unsanctioned telemetry collection.
+- **Integrity Rule**: Always verify the APK signing certificate (v1/v2/v3 scheme) and check if \`android:debuggable="true"\` is exposed.`;
   }
 
-  return `### Forensic Advisory [${caseId}]
-- **Active Case Scope**: Correlating ${evidenceCount} evidence items.
-- **Evidence Stratification**: All findings are classified under defensible standards (Observed, Confirmed, Inferred, Potential, Unknown).
-- **Core Recommendation**: Maintain cryptographic chain of custody using SHA-256 hashes. Prioritize containment on confirmed outbound command and control indicators while isolating the suspect endpoint for RAM acquisition.`;
+  // 5. PCAP & Network Telemetry
+  if (lastUserMsg.includes('pcap') || lastUserMsg.includes('packet') || lastUserMsg.includes('syn') || lastUserMsg.includes('tunneling') || lastUserMsg.includes('beacon')) {
+    return `### Network Packet Forensics (PCAP) Analysis
+- **TCP Flag Triage**:
+  - High ratio of \`SYN\` packets without completing 3-way handshakes indicates SYN flood denial-of-service or port reconnaissance.
+  - High \`RST\` packet frequency indicates closed service rejection or abrupt connection teardown.
+- **C2 Beaconing Detection**:
+  - Identify persistent outbound HTTP/TLS connections occurring at regular periodic intervals (low jitter, e.g. every 60s ± 2s).
+- **DNS Tunneling Indicators**:
+  - Unusually long TXT or A record subdomain queries (e.g. \`[base64].sub.example.com\`) with high query frequency and atypical character sets.
+- **Verification Rule**: Never decrypt payload content without legal authorization and proper cryptographic key escrow.`;
+  }
+
+  // 6. Active Case Evidence Correlation
+  return `### Veylith Forensic Advisory [${caseId}]
+- **Active Case Scope**: Tracking ${evidenceCount} evidence items.
+- **Defensible Evidence Standard**: Findings are stratified as Observed, Confirmed, Inferred, Potential, or Unknown.
+- **Prioritized Recommendations**:
+  1. Maintain cryptographic integrity by validating SHA-256 hashes for all physical and disk images.
+  2. For external infrastructure, deploy baseline browser hardening headers (CSP, XFO, XCTO, HSTS) and verify via \`curl -I\`.
+  3. For suspect endpoints, acquire volatile RAM images prior to rebooting or applying destructive containment.`;
 }
 
 function generateDeterministicInvestigationSummary(objective: string, scope: any, evidence: any[], notice?: string) {

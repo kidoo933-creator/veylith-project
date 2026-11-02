@@ -12,6 +12,7 @@ import {
   Database,
   Settings,
   Code2,
+  Share2,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -47,6 +48,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onNavigate, caseCo
       label: 'Investigation Workspace',
       icon: <GitBranch className="w-4 h-4" />,
       badge: String(caseCount),
+    },
+    {
+      id: 'evidence-graph',
+      label: 'Evidence Graph',
+      icon: <Share2 className="w-4 h-4 text-teal-600 dark:text-teal-400" />,
+      badge: 'Defensible',
     },
     {
       id: 'vulnerability-intel',

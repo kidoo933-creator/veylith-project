@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ViewTab, CaseRecord, SeverityLevel } from './types';
+import { ViewTab, CaseRecord, SeverityLevel, ConfidenceLevel } from './types';
 import {
   getStoredCases,
   saveCases,
@@ -7,11 +7,17 @@ import {
   setActiveCaseId,
   createCase,
   addEvidenceToCase,
+  addFindingToCase,
+  updateFindingStatus,
+  updateCorrelationOverride,
   addNoteToCase,
   updateCaseStatus,
   deleteCase,
   INITIAL_CASES,
+  loadTrainingScenario,
+  clearAllCases,
 } from './utils/storage';
+import { CorrelationStatus, Finding } from './types';
 import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
 import { MobileFrame } from './components/MobileFrame';
@@ -24,6 +30,7 @@ import { VulnerabilityIntelView } from './views/VulnerabilityIntelView';
 import { AiAnalysisView } from './views/AiAnalysisView';
 import { ReportsView } from './views/ReportsView';
 import { DataSourcesView } from './views/DataSourcesView';
+import { EvidenceGraphView } from './views/EvidenceGraphView';
 import { SettingsView } from './views/SettingsView';
 import { AndroidProjectView } from './views/AndroidProjectView';
 import {
@@ -44,7 +51,7 @@ import {
 export default function App() {
   const [currentTab, setCurrentTab] = useState<ViewTab>('overview');
   const [cases, setCases] = useState<CaseRecord[]>([]);
-  const [activeCaseId, setActiveCase] = useState<string>('#VY-2025-0047');
+  const [activeCaseId, setActiveCase] = useState<string>('');
   const [isDark, setIsDark] = useState<boolean>(false);
   const [viewMode, setViewMode] = useState<'desktop' | 'mobile'>('desktop');
   const [searchQuery, setSearchQuery] = useState('');
@@ -103,22 +110,50 @@ export default function App() {
     name: string,
     type: 'domain' | 'ip' | 'file' | 'hash' | 'cve' | 'pcap' | 'header' | 'finding',
     value: string,
-    notes: string
+    notes: string,
+    extra?: {
+      source?: string;
+      confidence?: ConfidenceLevel;
+      metadata?: Record<string, any>;
+    }
   ) => {
     try {
       addEvidenceToCase(activeCaseId, {
         name,
         type,
         value,
-        confidence: 'Observed',
-        source: 'Veylith Core Telemetry',
+        confidence: extra?.confidence || 'Observed',
+        source: extra?.source || 'Veylith Core Telemetry',
         notes,
+        metadata: extra?.metadata,
       });
       setCases(getStoredCases());
       showToast(`Attached ${type.toUpperCase()} evidence to case ${activeCaseId}.`);
     } catch (err: any) {
       showToast(`Error: ${err.message}`);
     }
+  };
+
+  const handleLogFinding = (caseId: string, findingData: Partial<Finding>) => {
+    try {
+      const created = addFindingToCase(caseId, findingData);
+      setCases(getStoredCases());
+      showToast(`Logged finding [${created.id}] to case ${caseId}.`);
+    } catch (err: any) {
+      showToast(`Error logging finding: ${err.message}`);
+    }
+  };
+
+  const handleUpdateFindingStatus = (caseId: string, findingId: string, status: Finding['status']) => {
+    updateFindingStatus(caseId, findingId, status);
+    setCases(getStoredCases());
+    showToast(`Finding ${findingId} status marked as ${status}.`);
+  };
+
+  const handleUpdateCorrelationOverride = (caseId: string, edgeId: string, status: CorrelationStatus) => {
+    updateCorrelationOverride(caseId, edgeId, status);
+    setCases(getStoredCases());
+    showToast(`Correlation marked as ${status.toUpperCase()}. Evidence integrity preserved.`);
   };
 
   const handleUpdateCaseStatus = (caseId: string, status: CaseRecord['status']) => {
@@ -144,12 +179,26 @@ export default function App() {
     showToast(`Case ${caseId} removed.`);
   };
 
+  const handleLoadTrainingScenario = () => {
+    const loaded = loadTrainingScenario();
+    setCases(loaded);
+    if (loaded.length > 0) {
+      setActiveCase(loaded[0].id);
+      setActiveCaseId(loaded[0].id);
+    }
+    showToast('Loaded verified training scenario (Sandbox Mode).');
+  };
+
+  const handleClearAllCases = () => {
+    const cleared = clearAllCases();
+    setCases(cleared);
+    setActiveCase('');
+    setActiveCaseId('');
+    showToast('Database wiped to clean operational state (0 cases).');
+  };
+
   const handleResetDatabase = () => {
-    saveCases(INITIAL_CASES);
-    setCases(INITIAL_CASES);
-    setActiveCase(INITIAL_CASES[0].id);
-    setActiveCaseId(INITIAL_CASES[0].id);
-    showToast('Database reset to baseline verified intelligence.');
+    handleLoadTrainingScenario();
   };
 
   // Render the core view content
@@ -165,12 +214,15 @@ export default function App() {
               setActiveCaseId(id);
             }}
             onCreateCase={handleCreateCase}
+            onLoadTrainingScenario={handleLoadTrainingScenario}
+            onClearCases={handleClearAllCases}
           />
         );
       case 'domain-intel':
         return (
           <DomainIntelView
             onAttachEvidence={handleAttachEvidence}
+            onLogFinding={handleLogFinding}
             activeCaseId={activeCaseId}
           />
         );
@@ -178,6 +230,7 @@ export default function App() {
         return (
           <FileForensicsView
             onAttachEvidence={handleAttachEvidence}
+            onLogFinding={handleLogFinding}
             activeCaseId={activeCaseId}
           />
         );
@@ -185,6 +238,7 @@ export default function App() {
         return (
           <PcapLabView
             onAttachEvidence={handleAttachEvidence}
+            onLogFinding={handleLogFinding}
             activeCaseId={activeCaseId}
           />
         );
@@ -204,6 +258,22 @@ export default function App() {
               setActiveCase(id);
               setCurrentTab('reports');
             }}
+            onUpdateFindingStatus={handleUpdateFindingStatus}
+            onUpdateCorrelationOverride={handleUpdateCorrelationOverride}
+          />
+        );
+      case 'evidence-graph':
+        return (
+          <EvidenceGraphView
+            cases={cases}
+            activeCaseId={activeCaseId}
+            onSelectCase={(id) => {
+              setActiveCase(id);
+              setActiveCaseId(id);
+            }}
+            onNavigateToTab={(tab) => setCurrentTab(tab)}
+            onUpdateCorrelationOverride={handleUpdateCorrelationOverride}
+            onUpdateFindingStatus={handleUpdateFindingStatus}
           />
         );
       case 'vulnerability-intel':
@@ -226,6 +296,8 @@ export default function App() {
             onToggleTheme={toggleTheme}
             cases={cases}
             onResetDatabase={handleResetDatabase}
+            onClearAllCases={handleClearAllCases}
+            onLoadTrainingScenario={handleLoadTrainingScenario}
           />
         );
       case 'android-project':
@@ -235,8 +307,13 @@ export default function App() {
           <OverviewView
             cases={cases}
             onNavigate={(tab) => setCurrentTab(tab)}
-            onSelectCase={(id) => setActiveCase(id)}
+            onSelectCase={(id) => {
+              setActiveCase(id);
+              setActiveCaseId(id);
+            }}
             onCreateCase={handleCreateCase}
+            onLoadTrainingScenario={handleLoadTrainingScenario}
+            onClearCases={handleClearAllCases}
           />
         );
     }
@@ -320,6 +397,7 @@ export default function App() {
                   { id: 'file-forensics', label: 'Evidence Lab' },
                   { id: 'pcap-lab', label: 'PCAP Lab' },
                   { id: 'investigation-workspace', label: 'Workspace' },
+                  { id: 'evidence-graph', label: 'Evidence Graph' },
                   { id: 'vulnerability-intel', label: 'Vulnerabilities' },
                   { id: 'ai-analysis', label: 'AI Investigation' },
                   { id: 'reports', label: 'Reports' },

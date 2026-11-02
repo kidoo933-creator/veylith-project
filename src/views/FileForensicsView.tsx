@@ -1,6 +1,10 @@
 import React, { useState } from 'react';
-import { FileAnalysisResult } from '../types';
+import { FileAnalysisResult, Finding, InvestigationViewMode } from '../types';
 import { analyzeFile, MAX_FILE_SIZE_BYTES } from '../utils/forensics';
+import { createFileForensicsFinding } from '../utils/findingNormalization';
+import { InvestigationViewToggle } from '../components/InvestigationViewToggle';
+import { SimpleResultsReport } from '../components/SimpleResultsReport';
+import { generateFileForensicsSimpleReport } from '../utils/fileForensicsAiAnalyst';
 import {
   Upload,
   FileText,
@@ -23,21 +27,27 @@ import {
   FileCode,
   FolderArchive,
   BarChart2,
+  BookmarkCheck,
+  Sparkles,
 } from 'lucide-react';
+import { GeminiForensicsChat } from '../components/GeminiForensicsChat';
 
 interface FileForensicsViewProps {
   onAttachEvidence: (name: string, type: 'file' | 'hash' | 'finding', value: string, notes: string) => void;
+  onLogFinding?: (caseId: string, findingData: Partial<Finding>) => void;
   activeCaseId: string;
 }
 
 type ForensicsTab = 'summary' | 'metadata' | 'entropy' | 'strings' | 'apk' | 'unavailable';
 
-export const FileForensicsView: React.FC<FileForensicsViewProps> = ({ onAttachEvidence, activeCaseId }) => {
+export const FileForensicsView: React.FC<FileForensicsViewProps> = ({ onAttachEvidence, onLogFinding, activeCaseId }) => {
   const [analyzing, setAnalyzing] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<InvestigationViewMode>('simple');
   const [activeTab, setActiveTab] = useState<ForensicsTab>('summary');
   const [stringFilter, setStringFilter] = useState<'all' | 'url' | 'ip' | 'api' | 'command' | 'registry' | 'path'>('all');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [findingLogged, setFindingLogged] = useState(false);
 
   const [result, setResult] = useState<FileAnalysisResult | null>(null);
 
@@ -59,8 +69,10 @@ export const FileForensicsView: React.FC<FileForensicsViewProps> = ({ onAttachEv
     setErrorMessage(null);
     try {
       const res = await analyzeFile(file);
+      res.simpleReport = generateFileForensicsSimpleReport(res);
       setResult(res);
-      // Auto switch to APK tab if it's an APK
+      setViewMode('simple');
+      // Auto switch to APK tab if it's an APK when viewing deep analysis
       if (res.apkDetails?.isApk) {
         setActiveTab('apk');
       } else {
@@ -133,7 +145,9 @@ export const FileForensicsView: React.FC<FileForensicsViewProps> = ({ onAttachEv
       }
 
       const res = await analyzeFile(mockFile);
+      res.simpleReport = generateFileForensicsSimpleReport(res);
       setResult(res);
+      setViewMode('simple');
       if (type === 'sample-apk') setActiveTab('apk');
       else setActiveTab('summary');
     } finally {
@@ -283,35 +297,108 @@ export const FileForensicsView: React.FC<FileForensicsViewProps> = ({ onAttachEv
               </div>
             </div>
 
-            <button
-              onClick={() => {
-                onAttachEvidence(
-                  result.fileName,
-                  'file',
-                  result.sha256,
-                  `SHA-256: ${result.sha256}. Entropy: ${result.entropy}. Format: ${result.detectedFormat}`
-                );
-              }}
-              className="flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-semibold bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700/60 text-slate-700 dark:text-slate-200 rounded-xl transition shadow-xs"
-            >
-              <Plus className="w-3.5 h-3.5 text-teal-600" />
-              <span>Attach Hash to Case ({activeCaseId})</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => {
+                  onAttachEvidence(
+                    result.fileName,
+                    'file',
+                    result.sha256,
+                    `SHA-256: ${result.sha256}. Entropy: ${result.entropy}. Format: ${result.detectedFormat}`
+                  );
+                }}
+                className="flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700/60 text-slate-700 dark:text-slate-200 rounded-xl transition shadow-xs"
+              >
+                <Plus className="w-3.5 h-3.5 text-teal-600" />
+                <span>Attach Hash to Case ({activeCaseId})</span>
+              </button>
+
+              {onLogFinding && (
+                <button
+                  onClick={() => {
+                    const finding = createFileForensicsFinding({
+                      caseId: activeCaseId,
+                      fileName: result.fileName,
+                      sha256: result.sha256,
+                      title: result.formatMismatch
+                        ? `File Masquerade Detected: ${result.fileName}`
+                        : `Forensics Artifact: ${result.fileName} (${result.detectedFormat})`,
+                      observedResult: `Magic Bytes: ${result.magicBytes}. Detected: ${result.detectedFormat}. Entropy: ${result.entropy.toFixed(2)}. Mismatch: ${result.formatMismatch ? 'Yes' : 'No'}.`,
+                      description: `Static file forensics examination on ${result.fileName} (${result.fileSizeFormatted}). SHA-256: ${result.sha256}.`,
+                      severity: result.formatMismatch ? 'High' : result.entropy > 7.5 ? 'Medium' : 'Low',
+                      severityRationale: result.formatMismatch
+                        ? 'File extension does not align with true binary signature magic bytes, indicating deliberate disguise.'
+                        : result.entropy > 7.5
+                        ? 'High Shannon entropy indicating packed code, encrypted payload, or compressed stream.'
+                        : 'Standard file signature and uniform byte distribution observed.',
+                      confidence: 'Confirmed',
+                      evidenceIds: [],
+                    });
+                    onLogFinding(activeCaseId, finding);
+                    setFindingLogged(true);
+                    setTimeout(() => setFindingLogged(false), 3000);
+                  }}
+                  disabled={findingLogged}
+                  className={`flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-xl transition shadow-xs ${
+                    findingLogged
+                      ? 'bg-emerald-600 text-white border border-emerald-500'
+                      : 'bg-purple-600 hover:bg-purple-700 text-white'
+                  }`}
+                >
+                  {findingLogged ? (
+                    <>
+                      <BookmarkCheck className="w-3.5 h-3.5" />
+                      <span>Finding Logged!</span>
+                    </>
+                  ) : (
+                    <>
+                      <ShieldAlert className="w-3.5 h-3.5" />
+                      <span>Log Forensic Finding</span>
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
           </div>
 
-          {/* Extension Mismatch Warning */}
-          {result.formatMismatch && (
-            <div className="p-4 bg-red-50 dark:bg-red-950/60 border border-red-200 dark:border-red-800 rounded-2xl flex items-start gap-3 text-xs text-red-700 dark:text-red-300">
-              <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-bold text-sm">Masquerading / Signature Mismatch Detected</p>
-                <p className="text-xs leading-relaxed mt-1">{result.mismatchDescription}</p>
-              </div>
-            </div>
+          {/* Top-Level Investigation Mode Toggle */}
+          <InvestigationViewToggle
+            mode={viewMode}
+            onChange={setViewMode}
+            simpleLabel="Simple Results"
+            deepLabel="Deep Analysis"
+            simpleDescription="Human-Readable Cybersecurity Analyst Report"
+            deepDescription="Raw Hashes, Section Headers, Shannon Entropy & Byte Analysis"
+            findingCounts={{
+              concerns: result.formatMismatch ? 1 : result.entropy > 7.0 ? 1 : 0,
+              technicalItems: result.printableStrings.total + (result.metadata?.peMetadata?.sections?.length || 0),
+            }}
+          />
+
+          {/* VIEW 1: SIMPLE RESULTS (DEFAULT) */}
+          {viewMode === 'simple' && (
+            <SimpleResultsReport
+              report={result.simpleReport || generateFileForensicsSimpleReport(result)}
+              onNavigateToDeep={() => setViewMode('deep')}
+            />
           )}
 
-          {/* Sub Navigation Tabs */}
-          <div className="flex items-center gap-1.5 border-b border-slate-200 dark:border-slate-800 pb-2 text-xs font-medium overflow-x-auto select-none">
+          {/* VIEW 2: DEEP ANALYSIS (TECHNICAL TELEMETRY) */}
+          {viewMode === 'deep' && (
+            <div className="space-y-6">
+              {/* Extension Mismatch Warning */}
+              {result.formatMismatch && (
+                <div className="p-4 bg-red-50 dark:bg-red-950/60 border border-red-200 dark:border-red-800 rounded-2xl flex items-start gap-3 text-xs text-red-700 dark:text-red-300">
+                  <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-bold text-sm">Masquerading / Signature Mismatch Detected</p>
+                    <p className="text-xs leading-relaxed mt-1">{result.mismatchDescription}</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Sub Navigation Tabs */}
+              <div className="flex items-center gap-1.5 border-b border-slate-200 dark:border-slate-800 pb-2 text-xs font-medium overflow-x-auto select-none">
             <button
               onClick={() => setActiveTab('summary')}
               className={`px-3 py-1.5 rounded-lg transition shrink-0 ${
@@ -928,6 +1015,8 @@ export const FileForensicsView: React.FC<FileForensicsViewProps> = ({ onAttachEv
               </div>
             </div>
           )}
+          </div>
+        )}
         </div>
       )}
     </div>

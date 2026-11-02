@@ -1,8 +1,23 @@
-import { PcapAnalysisResult, PcapPacket, SeverityLevel } from '../types';
+import { PcapAnalysisResult, PcapInterfaceInfo, PcapPacket, SeverityLevel } from '../types';
 
-export function parsePcapFile(buffer: ArrayBuffer, fileName: string): PcapAnalysisResult {
+export function getLinkTypeName(lt: number): string {
+  if (lt === 1) return 'Ethernet (10Mb/100Mb/1Gb/10Gb)';
+  if (lt === 0) return 'Null / Loopback (0)';
+  if (lt === 101) return 'Raw IP (101)';
+  if (lt === 113) return 'Linux Cooked Capture v1 (SLL)';
+  if (lt === 276) return 'Linux Cooked Capture v2 (SLL2)';
+  return `LinkType ${lt}`;
+}
+
+export const MAX_PCAP_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB safety ceiling against memory exhaustion
+
+export function parsePcapFile(buffer: ArrayBuffer | ArrayBufferLike, fileName: string): PcapAnalysisResult {
   const bytes = new Uint8Array(buffer);
   const dataView = new DataView(buffer);
+
+  if (bytes.length > MAX_PCAP_SIZE_BYTES) {
+    throw new Error(`File exceeds maximum permitted PCAP analysis size of 50 MB (${(bytes.length / (1024 * 1024)).toFixed(1)} MB provided).`);
+  }
 
   if (bytes.length < 24) {
     throw new Error('File too small to be a valid PCAP file (minimum 24 bytes required).');
@@ -51,7 +66,32 @@ export function parsePcapFile(buffer: ArrayBuffer, fileName: string): PcapAnalys
   const dnsQueries: string[] = [];
   let cleartextCredFound = false;
 
+  let linkType = 1;
+  let linkTypeName = 'Ethernet (1)';
+  let unsupportedLinkType = false;
+  let truncatedPacketsCount = 0;
+  let pcapNgInterfaces: PcapInterfaceInfo[] | undefined;
+
   if (!isPcapNg) {
+    // Extract Datalink Type from PCAP global header (offset 20)
+    linkType = dataView.getUint32(20, isLittleEndian);
+    if (linkType === 1) linkTypeName = 'Ethernet (10Mb/100Mb/1Gb/10Gb)';
+    else if (linkType === 0) linkTypeName = 'Null / Loopback (0)';
+    else if (linkType === 101) linkTypeName = 'Raw IP (101)';
+    else if (linkType === 113) linkTypeName = 'Linux Cooked Capture v1 (SLL)';
+    else if (linkType === 276) linkTypeName = 'Linux Cooked Capture v2 (SLL2)';
+    else linkTypeName = `LinkType ${linkType}`;
+
+    if (linkType !== 1) {
+      unsupportedLinkType = true;
+      anomalies.push({
+        severity: 'Medium',
+        title: `Non-Ethernet Datalink Type (${linkTypeName})`,
+        description: `This capture was recorded with LinkType ${linkType} rather than standard Ethernet (LINKTYPE_ETHERNET = 1). Frame headers may be non-standard.`,
+        evidence: `Datalink header network value = ${linkType} (${linkTypeName})`,
+      });
+    }
+
     // Standard PCAP parsing
     let offset = 24; // Skip 24-byte global header
 
@@ -63,7 +103,16 @@ export function parsePcapFile(buffer: ArrayBuffer, fileName: string): PcapAnalys
       const origLen = dataView.getUint32(offset + 12, isLittleEndian);
       offset += 16;
 
-      if (offset + inclLen > bytes.length) break;
+      if (offset + inclLen > bytes.length) {
+        truncatedPacketsCount++;
+        anomalies.push({
+          severity: 'High',
+          title: 'Truncated Packet Capture Data',
+          description: `Packet #${packetIndex} specifies capture length of ${inclLen} bytes, but only ${bytes.length - offset} bytes remain in file buffer.`,
+          evidence: `File offset: ${offset}, Required length: ${inclLen}, Available bytes: ${bytes.length - offset}`,
+        });
+        break;
+      }
 
       totalBytes += origLen;
       const timeMs = tsSec * 1000 + Math.floor(tsUsec / 1000);
@@ -125,31 +174,290 @@ export function parsePcapFile(buffer: ArrayBuffer, fileName: string): PcapAnalys
       packetIndex++;
     }
   } else {
-    // Fallback parser for PCAPNG simple blocks
-    // Provide structured parsing
+    // Accurate PCAPNG Block Parsing (SHB, IDB, EPB, SPB)
+    interface InternalPcapNgInterface {
+      id: number;
+      linkType: number;
+      linkTypeName: string;
+      snapLen: number;
+      name?: string;
+      tsResol: { isBinary: boolean; value: number };
+      tsOffsetSeconds: number;
+      optionsParsed: boolean;
+      malformedOptions?: boolean;
+    }
+
+    const interfaces: InternalPcapNgInterface[] = [];
     let offset = 0;
     let packetIndex = 1;
+
     while (offset + 12 <= bytes.length && packetIndex <= 2000) {
       const blockType = dataView.getUint32(offset, isLittleEndian);
       const blockLen = dataView.getUint32(offset + 4, isLittleEndian);
       if (blockLen < 12 || offset + blockLen > bytes.length) break;
 
-      // Enhanced Packet Block (0x00000006) or Simple Packet Block (0x00000003)
-      if (blockType === 0x00000006 && blockLen >= 32) {
-        const capLen = dataView.getUint32(offset + 20, isLittleEndian);
-        const packetBytes = bytes.slice(offset + 28, offset + 28 + capLen);
-        const timeMs = Date.now() - (2000 - packetIndex) * 50;
-        const decoded = decodeFrame(packetBytes, packetIndex, timeMs);
-        if (decoded) {
-          packets.push(decoded);
-          totalBytes += capLen;
-          protocolCounts[decoded.protocol] = (protocolCounts[decoded.protocol] || 0) + 1;
-          if (decoded.appProtocol) protocolCounts[decoded.appProtocol] = (protocolCounts[decoded.appProtocol] || 0) + 1;
+      // Section Header Block (0x0A0D0D0A)
+      if (blockType === 0x0a0d0d0a && blockLen >= 16) {
+        const bom = dataView.getUint32(offset + 8, false);
+        if (bom === 0x1a2b3c4d) {
+          isLittleEndian = false;
+        } else if (bom === 0x4d3c2b1a) {
+          isLittleEndian = true;
         }
       }
+
+      // Interface Description Block (0x00000001)
+      else if (blockType === 0x00000001 && blockLen >= 16) {
+        const idbLinkType = dataView.getUint16(offset + 8, isLittleEndian);
+        const idbSnapLen = dataView.getUint32(offset + 12, isLittleEndian);
+
+        let tsResol = { isBinary: false, value: 6 }; // Default: 10^-6 s (1 microsecond)
+        let tsOffsetSeconds = 0;
+        let ifName: string | undefined;
+        let malformedOptions = false;
+
+        let optOffset = offset + 16;
+        const optEnd = offset + blockLen - 4;
+
+        while (optOffset + 4 <= optEnd) {
+          const optCode = dataView.getUint16(optOffset, isLittleEndian);
+          const optLen = dataView.getUint16(optOffset + 2, isLittleEndian);
+          if (optCode === 0) break; // opt_endofopt
+
+          const valOffset = optOffset + 4;
+          if (valOffset + optLen > optEnd) {
+            malformedOptions = true;
+            anomalies.push({
+              severity: 'Medium',
+              title: 'Malformed PCAPNG IDB Option',
+              description: `Option code ${optCode} specifies length ${optLen} which overflows IDB boundary.`,
+              evidence: `Interface #${interfaces.length}, block offset ${offset}, optOffset ${optOffset}`,
+            });
+            break;
+          }
+
+          if (optCode === 9) {
+            // if_tsresol (1 byte)
+            if (optLen >= 1) {
+              const rawByte = dataView.getUint8(valOffset);
+              const isBinary = (rawByte & 0x80) !== 0;
+              const value = rawByte & 0x7f;
+              tsResol = { isBinary, value };
+            }
+          } else if (optCode === 14) {
+            // if_tsoffset (8 bytes, signed 64-bit integer)
+            if (optLen >= 8) {
+              try {
+                const rawSec = dataView.getBigInt64(valOffset, isLittleEndian);
+                tsOffsetSeconds = Number(rawSec);
+              } catch {
+                const low = dataView.getUint32(valOffset + (isLittleEndian ? 0 : 4), isLittleEndian);
+                const high = dataView.getInt32(valOffset + (isLittleEndian ? 4 : 0), isLittleEndian);
+                tsOffsetSeconds = high * 4294967296 + low;
+              }
+            }
+          } else if (optCode === 2) {
+            // if_name (UTF-8 string)
+            try {
+              const nameBytes = bytes.slice(valOffset, valOffset + optLen);
+              ifName = new TextDecoder('utf-8', { fatal: false }).decode(nameBytes).replace(/\0+$/, '');
+            } catch {
+              // ignore string decoding errors
+            }
+          }
+
+          const padding = (4 - (optLen % 4)) % 4;
+          optOffset += 4 + optLen + padding;
+        }
+
+        const ifaceId = interfaces.length;
+        const ifaceLinkTypeName = getLinkTypeName(idbLinkType);
+        if (ifaceId === 0) {
+          linkType = idbLinkType;
+          linkTypeName = ifaceLinkTypeName;
+        }
+
+        if (idbLinkType !== 1 && !unsupportedLinkType) {
+          unsupportedLinkType = true;
+          anomalies.push({
+            severity: 'Medium',
+            title: `Non-Ethernet PCAPNG Interface Datalink Type (${ifaceLinkTypeName})`,
+            description: `Interface #${ifaceId} specifies LinkType ${idbLinkType} rather than standard Ethernet (1).`,
+            evidence: `Interface ID: ${ifaceId}, LinkType: ${idbLinkType} (${ifaceLinkTypeName})`,
+          });
+        }
+
+        interfaces.push({
+          id: ifaceId,
+          linkType: idbLinkType,
+          linkTypeName: ifaceLinkTypeName,
+          snapLen: idbSnapLen,
+          name: ifName,
+          tsResol,
+          tsOffsetSeconds,
+          optionsParsed: true,
+          malformedOptions,
+        });
+      }
+
+      // Enhanced Packet Block (0x00000006)
+      else if (blockType === 0x00000006 && blockLen >= 32) {
+        const interfaceId = dataView.getUint32(offset + 8, isLittleEndian);
+        const tsHigh = dataView.getUint32(offset + 12, isLittleEndian);
+        const tsLow = dataView.getUint32(offset + 16, isLittleEndian);
+        const capLen = dataView.getUint32(offset + 20, isLittleEndian);
+        const origLen = dataView.getUint32(offset + 24, isLittleEndian);
+
+        if (offset + 28 + capLen <= bytes.length) {
+          totalBytes += origLen || capLen;
+
+          let iface = interfaces[interfaceId];
+          if (!iface && interfaceId === 0 && interfaces.length === 0) {
+            // Implicit interface 0 fallback for minimal synthetic captures without IDB
+            iface = {
+              id: 0,
+              linkType: 1,
+              linkTypeName: 'Ethernet (1)',
+              snapLen: 65535,
+              tsResol: { isBinary: false, value: 6 },
+              tsOffsetSeconds: 0,
+              optionsParsed: false,
+            };
+            interfaces.push(iface);
+            anomalies.push({
+              severity: 'Low',
+              title: 'Implicit Interface Description in PCAPNG',
+              description: 'EPB referenced Interface 0 before any IDB was defined; using default PCAPNG microsecond resolution.',
+              evidence: `Block offset ${offset}, Interface ID: 0`,
+            });
+          }
+
+          let timeMs = 0;
+          let timestampUnreliable = false;
+          let timestampLimitation: string | undefined;
+
+          const rawTicks = (BigInt(tsHigh) << 32n) | BigInt(tsLow);
+
+          if (!iface) {
+            timestampUnreliable = true;
+            timestampLimitation = `EPB specifies Interface ID ${interfaceId}, but only ${interfaces.length} interface(s) exist.`;
+            anomalies.push({
+              severity: 'Medium',
+              title: 'Unmatched PCAPNG Interface ID',
+              description: timestampLimitation,
+              evidence: `Frame #${packetIndex}, Block offset ${offset}, InterfaceID: ${interfaceId}`,
+            });
+          } else if (rawTicks === 0n && tsHigh === 0 && tsLow === 0) {
+            timestampUnreliable = true;
+            timestampLimitation = 'Capture timestamp ticks are zero (unrecorded).';
+          } else {
+            let seconds: number;
+            if (iface.tsResol.isBinary) {
+              const divisor = Math.pow(2, iface.tsResol.value);
+              seconds = Number(rawTicks) / divisor + iface.tsOffsetSeconds;
+            } else {
+              const b = iface.tsResol.value;
+              if (b === 6) {
+                seconds = Number(rawTicks / 1000000n) + Number(rawTicks % 1000000n) / 1000000 + iface.tsOffsetSeconds;
+              } else if (b === 9) {
+                seconds = Number(rawTicks / 1000000000n) + Number(rawTicks % 1000000000n) / 1000000000 + iface.tsOffsetSeconds;
+              } else {
+                const divisor = Math.pow(10, b);
+                seconds = Number(rawTicks) / divisor + iface.tsOffsetSeconds;
+              }
+            }
+
+            timeMs = Math.round(seconds * 1000);
+
+            if (!Number.isFinite(timeMs) || timeMs < 0 || timeMs > 4102444800000) {
+              timestampUnreliable = true;
+              timestampLimitation = `Calculated timestamp out of bounds (${seconds}s).`;
+            }
+          }
+
+          if (!timestampUnreliable) {
+            if (timeMs < minTime) minTime = timeMs;
+            if (timeMs > maxTime) maxTime = timeMs;
+          }
+
+          const packetBytes = bytes.slice(offset + 28, offset + 28 + capLen);
+          const decoded = decodeFrame(packetBytes, packetIndex, timeMs, interfaceId, timestampUnreliable, timestampLimitation);
+
+          if (decoded) {
+            packets.push(decoded);
+            protocolCounts[decoded.protocol] = (protocolCounts[decoded.protocol] || 0) + 1;
+            if (decoded.appProtocol) {
+              protocolCounts[decoded.appProtocol] = (protocolCounts[decoded.appProtocol] || 0) + 1;
+            }
+
+            // Conversation pairing
+            if (decoded.srcIp && decoded.dstIp) {
+              const pairKey = [decoded.srcIp, decoded.dstIp].sort().join(' <-> ');
+              const conv = conversationsMap.get(pairKey) || {
+                pair: pairKey,
+                src: decoded.srcIp,
+                dst: decoded.dstIp,
+                proto: decoded.appProtocol || decoded.protocol,
+                packets: 0,
+                bytes: 0,
+              };
+              conv.packets++;
+              conv.bytes += capLen;
+              conversationsMap.set(pairKey, conv);
+            }
+
+            // Anomaly tracking
+            if (decoded.protocol === 'TCP') {
+              totalTcp++;
+              if (decoded.info.includes('[SYN]')) synCount++;
+            }
+            if (decoded.appProtocol === 'DNS' && decoded.info.includes('Query:')) {
+              const qName = decoded.info.split('Query: ')[1] || '';
+              if (qName) dnsQueries.push(qName);
+            }
+            if (decoded.info.includes('USER ') || decoded.info.includes('PASS ') || decoded.info.includes('Authorization: Basic')) {
+              cleartextCredFound = true;
+              anomalies.push({
+                severity: 'High',
+                title: 'Cleartext Authentication Credentials Observed',
+                description: 'Packet contains plain-text credentials or basic authentication tokens over unencrypted channel.',
+                evidence: `Frame #${decoded.index} (${decoded.srcIp}:${decoded.srcPort} -> ${decoded.dstIp}:${decoded.dstPort}) ${decoded.info}`,
+              });
+            }
+          }
+          packetIndex++;
+        }
+      } else if (blockType === 0x00000003 && blockLen >= 16) {
+        // Simple Packet Block (0x00000003) - Note: SPB has NO timestamps by spec
+        const capLen = blockLen - 12;
+        if (offset + 8 + capLen <= bytes.length) {
+          totalBytes += capLen;
+          const timestampUnreliable = true;
+          const timestampLimitation = 'Simple Packet Blocks (SPB) do not record timestamps.';
+
+          const packetBytes = bytes.slice(offset + 8, offset + 8 + capLen);
+          const decoded = decodeFrame(packetBytes, packetIndex, 0, 0, timestampUnreliable, timestampLimitation);
+          if (decoded) {
+            packets.push(decoded);
+            protocolCounts[decoded.protocol] = (protocolCounts[decoded.protocol] || 0) + 1;
+          }
+          packetIndex++;
+        }
+      }
+
       offset += blockLen;
-      packetIndex++;
     }
+
+    pcapNgInterfaces = interfaces.map((i) => ({
+      id: i.id,
+      linkType: i.linkType,
+      linkTypeName: i.linkTypeName,
+      name: i.name,
+      tsResolution: i.tsResol.isBinary ? `2^-${i.tsResol.value} seconds` : `10^-${i.tsResol.value} seconds`,
+      tsOffsetSeconds: i.tsOffsetSeconds,
+      isBinaryResolution: i.tsResol.isBinary,
+      malformedOptions: i.malformedOptions,
+    }));
   }
 
   // Assess heuristics & anomalies
@@ -192,10 +500,22 @@ export function parsePcapFile(buffer: ArrayBuffer, fileName: string): PcapAnalys
     topConversations,
     anomalies,
     packets,
+    interfaces: pcapNgInterfaces,
+    linkType,
+    linkTypeName,
+    truncatedPacketsCount,
+    unsupportedLinkType,
   };
 }
 
-function decodeFrame(frameBytes: Uint8Array, index: number, timeMs: number): PcapPacket | null {
+function decodeFrame(
+  frameBytes: Uint8Array,
+  index: number,
+  timeMs: number,
+  interfaceId = 0,
+  timestampUnreliable = false,
+  timestampLimitation?: string
+): PcapPacket | null {
   if (frameBytes.length < 14) return null;
 
   // Ethernet II header (14 bytes)
@@ -210,7 +530,17 @@ function decodeFrame(frameBytes: Uint8Array, index: number, timeMs: number): Pca
   let dstPort: number | undefined;
   let info = '';
 
-  const timeStr = new Date(timeMs || Date.now()).toLocaleTimeString() + '.' + String(timeMs % 1000).padStart(3, '0');
+  let timeStr: string;
+  if (timestampUnreliable) {
+    timeStr = `UNVERIFIED (${timestampLimitation || 'Unreliable timestamp'})`;
+  } else if (timeMs > 0) {
+    const d = new Date(timeMs);
+    timeStr = !isNaN(d.getTime())
+      ? d.toISOString().replace('T', ' ').replace('Z', '')
+      : `EPOCH_${timeMs}ms`;
+  } else {
+    timeStr = `UNVERIFIED (Zero or unrecorded timestamp)`;
+  }
 
   if (etherType === 0x0800) {
     // IPv4
@@ -256,7 +586,7 @@ function decodeFrame(frameBytes: Uint8Array, index: number, timeMs: number): Pca
         payloadSnippet = String.fromCharCode(...frameBytes.slice(payloadOffset, payloadOffset + pLen)).replace(/[^\x20-\x7E]/g, ' ');
       }
 
-      info = `${appProtocol || 'TCP'} [${flagParts.join(', ')}] ${srcPort} -> ${dstPort} ${payloadSnippet ? `| ${payloadSnippet.slice(0, 40)}` : ''}`;
+      info = `${appProtocol || 'TCP'} [${flagParts.join(', ')}] ${srcPort} -> ${dstPort} ${payloadSnippet ? `| ${payloadSnippet.slice(0, 80).trim()}` : ''}`;
     } else if (ipProto === 17 && frameBytes.length >= transportOffset + 8) {
       // UDP
       protocol = 'UDP';
@@ -295,17 +625,76 @@ function decodeFrame(frameBytes: Uint8Array, index: number, timeMs: number): Pca
     }
   } else if (etherType === 0x0806) {
     protocol = 'ARP';
-    info = 'ARP Request / Reply';
+    if (frameBytes.length >= 14 + 28) {
+      const op = (frameBytes[20] << 8) | frameBytes[21];
+      srcIp = `${frameBytes[28]}.${frameBytes[29]}.${frameBytes[30]}.${frameBytes[31]}`;
+      dstIp = `${frameBytes[38]}.${frameBytes[39]}.${frameBytes[40]}.${frameBytes[41]}`;
+      info = op === 1 ? `ARP Who has ${dstIp}? Tell ${srcIp}` : `ARP Reply ${srcIp} is at ${dstIp}`;
+    } else {
+      info = 'ARP Request / Reply';
+    }
   } else if (etherType === 0x86dd) {
-    protocol = 'IPv6';
-    info = 'IPv6 Datagram';
+    // IPv6 Header (40 bytes starting at offset 14)
+    if (frameBytes.length >= 54) {
+      const formatV6 = (offset: number) => {
+        const words: string[] = [];
+        for (let i = 0; i < 16; i += 2) {
+          words.push(((frameBytes[offset + i] << 8) | frameBytes[offset + i + 1]).toString(16));
+        }
+        return words.join(':');
+      };
+
+      srcIp = formatV6(14 + 8);
+      dstIp = formatV6(14 + 24);
+      const nextHeader = frameBytes[14 + 6];
+      const transportOffset = 54;
+
+      if (nextHeader === 6 && frameBytes.length >= transportOffset + 20) {
+        protocol = 'TCP';
+        srcPort = (frameBytes[transportOffset] << 8) | frameBytes[transportOffset + 1];
+        dstPort = (frameBytes[transportOffset + 2] << 8) | frameBytes[transportOffset + 3];
+        const flags = frameBytes[transportOffset + 13];
+        const flagParts: string[] = [];
+        if (flags & 0x02) flagParts.push('SYN');
+        if (flags & 0x10) flagParts.push('ACK');
+        if (flags & 0x01) flagParts.push('FIN');
+        if (flags & 0x04) flagParts.push('RST');
+        if (flags & 0x08) flagParts.push('PSH');
+
+        if (srcPort === 80 || dstPort === 80 || srcPort === 8080 || dstPort === 8080) appProtocol = 'HTTP';
+        else if (srcPort === 443 || dstPort === 443) appProtocol = 'TLS';
+        else if (srcPort === 22 || dstPort === 22) appProtocol = 'SSH';
+        else if (srcPort === 21 || dstPort === 21) appProtocol = 'FTP';
+
+        info = `${appProtocol || 'TCP'} [${flagParts.join(', ')}] ${srcPort} -> ${dstPort}`;
+      } else if (nextHeader === 17 && frameBytes.length >= transportOffset + 8) {
+        protocol = 'UDP';
+        srcPort = (frameBytes[transportOffset] << 8) | frameBytes[transportOffset + 1];
+        dstPort = (frameBytes[transportOffset + 2] << 8) | frameBytes[transportOffset + 3];
+        if (srcPort === 53 || dstPort === 53) {
+          appProtocol = 'DNS';
+          info = `DNS ${srcPort} -> ${dstPort} (IPv6)`;
+        } else {
+          info = `UDP ${srcPort} -> ${dstPort} (IPv6)`;
+        }
+      } else if (nextHeader === 58) {
+        protocol = 'ICMP';
+        info = `ICMPv6 Type ${frameBytes[transportOffset]}`;
+      } else {
+        protocol = 'IPv6';
+        info = `IPv6 NextHeader ${nextHeader}`;
+      }
+    } else {
+      protocol = 'IPv6';
+      info = 'IPv6 Datagram (Truncated)';
+    }
   } else {
     info = `EtherType 0x${etherType.toString(16)}`;
   }
 
   return {
     index,
-    timestamp: timeMs,
+    timestamp: timestampUnreliable ? 0 : timeMs,
     timeStr,
     length: frameBytes.length,
     srcIp,
@@ -315,6 +704,9 @@ function decodeFrame(frameBytes: Uint8Array, index: number, timeMs: number): Pca
     protocol,
     appProtocol,
     info,
+    interfaceId,
+    timestampUnreliable,
+    timestampLimitation,
   };
 }
 
@@ -353,8 +745,11 @@ export function generateSamplePcap(type: 'c2-beacon' | 'dns-tunnel' | 'web-traff
   const dv = new DataView(outBuf);
   const outBytes = new Uint8Array(outBuf);
 
-  // Global header: 0xd4c3b2a1, v2.4, 0, 0, snaplen 65535, linktype 1 (Ethernet)
-  dv.setUint32(0, 0xd4c3b2a1, true);
+  // Global header: 0xd4c3b2a1 (little-endian libpcap magic)
+  outBytes[0] = 0xd4;
+  outBytes[1] = 0xc3;
+  outBytes[2] = 0xb2;
+  outBytes[3] = 0xa1;
   dv.setUint16(4, 2, true);
   dv.setUint16(6, 4, true);
   dv.setInt32(8, 0, true);
@@ -379,12 +774,16 @@ export function generateSamplePcap(type: 'c2-beacon' | 'dns-tunnel' | 'web-traff
 }
 
 function createSyntheticTcpPacket(srcIp: string, dstIp: string, srcPort: number, dstPort: number, info: string): Uint8Array {
-  const pkt = new Uint8Array(64);
+  const enc = new TextEncoder().encode(info);
+  const pkt = new Uint8Array(54 + enc.length);
   // Eth
   pkt[12] = 0x08;
   pkt[13] = 0x00;
   // IPv4
   pkt[14] = 0x45;
+  const totalIpLen = 40 + enc.length;
+  pkt[16] = (totalIpLen >> 8) & 0xff;
+  pkt[17] = totalIpLen & 0xff;
   pkt[23] = 6; // TCP
   const src = srcIp.split('.').map(Number);
   const dst = dstIp.split('.').map(Number);
@@ -397,6 +796,8 @@ function createSyntheticTcpPacket(srcIp: string, dstIp: string, srcPort: number,
   pkt[37] = dstPort & 0xff;
   pkt[46] = (5 << 4); // Data offset 5 (20 bytes)
   pkt[47] = 0x18; // PSH, ACK
+  // Copy payload
+  pkt.set(enc, 54);
   return pkt;
 }
 

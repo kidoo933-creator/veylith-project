@@ -75,6 +75,15 @@ export function detectFileSignature(bytes: Uint8Array): {
   expectedExtensions: string[];
   subType?: string;
 } {
+  if (bytes.length === 0) {
+    return {
+      magicHex: 'None (0 bytes)',
+      detectedFormat: 'Empty File (0 bytes)',
+      expectedExtensions: [],
+      subType: 'Zero-byte Payload',
+    };
+  }
+
   const slice = bytes.slice(0, 16);
   const hex = Array.from(slice)
     .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
@@ -482,6 +491,7 @@ export function inspectApkStructural(bytes: Uint8Array, fileName: string) {
 
   const hasCerts = text.includes('META-INF/') && (text.includes('.RSA') || text.includes('.SF') || text.includes('.DSA'));
   const hasDebuggable = text.includes('android:debuggable') || text.includes('debuggable="true"');
+  const hasZipSlip = text.includes('../') || text.includes('..\\');
 
   // Permission database with risk ratings and plain-English descriptions
   const catalog = [
@@ -561,6 +571,7 @@ export function inspectApkStructural(bytes: Uint8Array, fileName: string) {
     nativeArchitectures: nativeArchs,
     hasCertificates: hasCerts,
     hasDebuggableFlag: hasDebuggable,
+    hasZipSlipTraversal: hasZipSlip,
   };
 }
 
@@ -674,12 +685,13 @@ export async function analyzeFile(file: File): Promise<FileAnalysisResult> {
   const entropyBlocks = computeEntropyBlocks(bytes, 16);
   const sig = detectFileSignature(bytes);
 
-  // Check extension vs signature mismatch
-  const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+  // Check extension vs signature mismatch safely
+  const lastDot = file.name.lastIndexOf('.');
+  const ext = lastDot !== -1 ? file.name.slice(lastDot).toLowerCase() : '';
   let formatMismatch = false;
   let mismatchDescription: string | undefined;
 
-  if (sig.expectedExtensions.length > 0 && !sig.expectedExtensions.includes(ext)) {
+  if (ext && sig.expectedExtensions.length > 0 && !sig.expectedExtensions.includes(ext)) {
     formatMismatch = true;
     mismatchDescription = `File extension is "${ext}", but the file magic signature indicates "${sig.detectedFormat}". This discrepancy is a primary indicator of masquerading or disguised binary payloads.`;
   }

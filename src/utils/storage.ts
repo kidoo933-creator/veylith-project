@@ -1,5 +1,6 @@
-import { CaseRecord, EvidenceItem, Finding, SeverityLevel, CorrelationStatus } from '../types';
+import { CaseRecord, EvidenceItem, Finding, SeverityLevel, CorrelationStatus, HypothesisItem } from '../types';
 import { normalizeFinding } from './findingNormalization';
+import { createHypothesisItem } from './hypothesisEngine';
 import { TRAINING_SCENARIO_CASES, INITIAL_CASES } from '../data/trainingFixtures';
 
 export { TRAINING_SCENARIO_CASES, INITIAL_CASES };
@@ -848,4 +849,142 @@ export function getCaseById(caseId: string, activeTenantId?: string): CaseRecord
     assertTenantAccess(target, activeTenantId);
   }
   return target;
+}
+
+export function addHypothesisToCase(
+  caseId: string,
+  data: {
+    title: string;
+    premise: string;
+    confidence: 'High' | 'Medium' | 'Low';
+    supportingEvidenceIds?: string[];
+    contradictingEvidenceIds?: string[];
+    alternativeExplanations?: string[];
+    openQuestions?: string[];
+    nextSteps?: string[];
+    isAiSuggested?: boolean;
+    author?: string;
+  },
+  activeTenantId?: string
+): HypothesisItem {
+  assertRolePermission('canEditCase');
+  const cases = getStoredCases();
+  const c = cases.find((item) => item.id === caseId);
+  if (!c) throw new Error(`Case ${caseId} not found.`);
+  assertTenantAccess(c, activeTenantId);
+
+  const effectiveAuthor = data.author?.trim() || getAnalystProfile().name;
+  const hypothesis = createHypothesisItem(caseId, {
+    ...data,
+    author: effectiveAuthor,
+  });
+
+  if (!c.hypotheses) c.hypotheses = [];
+  c.hypotheses.push(hypothesis);
+  const now = new Date().toISOString();
+  c.updatedAt = now;
+
+  c.auditLog.push(
+    createChainedAuditEntry(
+      c.auditLog,
+      'HYPOTHESIS_CREATED',
+      effectiveAuthor,
+      `Analyst formulated investigative hypothesis [${hypothesis.id}]: "${hypothesis.title}" (${data.confidence} confidence).`,
+      now
+    )
+  );
+
+  saveCases(cases);
+  return hypothesis;
+}
+
+export function updateHypothesisInCase(
+  caseId: string,
+  hypothesisId: string,
+  updates: Partial<HypothesisItem>,
+  analystName?: string,
+  activeTenantId?: string
+): CaseRecord {
+  assertRolePermission('canEditCase');
+  const cases = getStoredCases();
+  const c = cases.find((item) => item.id === caseId);
+  if (!c) throw new Error(`Case ${caseId} not found.`);
+  assertTenantAccess(c, activeTenantId);
+
+  if (!c.hypotheses) c.hypotheses = [];
+  const idx = c.hypotheses.findIndex((h) => h.id === hypothesisId);
+  if (idx === -1) throw new Error(`Hypothesis ${hypothesisId} not found in case ${caseId}.`);
+
+  const now = new Date().toISOString();
+  const actor = analystName || getAnalystProfile().name;
+  const current = c.hypotheses[idx];
+
+  const changeNotes: string[] = [];
+  if (updates.status && updates.status !== current.status) {
+    changeNotes.push(`Status changed from ${current.status} to ${updates.status}`);
+  }
+  if (updates.confidence && updates.confidence !== current.confidence) {
+    changeNotes.push(`Confidence updated from ${current.confidence} to ${updates.confidence}`);
+  }
+  if (updates.title && updates.title !== current.title) {
+    changeNotes.push(`Title updated to "${updates.title}"`);
+  }
+
+  const updatedRevisions = [
+    ...(current.revisions || []),
+    {
+      timestamp: now,
+      analyst: actor,
+      action: 'Hypothesis Updated',
+      changeSummary: changeNotes.join(', ') || 'Updated hypothesis details or linked evidence.',
+    },
+  ];
+
+  c.hypotheses[idx] = {
+    ...current,
+    ...updates,
+    updatedAt: now,
+    revisions: updatedRevisions,
+  };
+  c.updatedAt = now;
+
+  c.auditLog.push(
+    createChainedAuditEntry(
+      c.auditLog,
+      'HYPOTHESIS_UPDATED',
+      actor,
+      `Updated hypothesis [${hypothesisId}]: ${changeNotes.join(', ') || 'Modified details.'}`,
+      now
+    )
+  );
+
+  saveCases(cases);
+  return c;
+}
+
+export function deleteHypothesisFromCase(caseId: string, hypothesisId: string, activeTenantId?: string): CaseRecord {
+  assertRolePermission('canEditCase');
+  const cases = getStoredCases();
+  const c = cases.find((item) => item.id === caseId);
+  if (!c) throw new Error(`Case ${caseId} not found.`);
+  assertTenantAccess(c, activeTenantId);
+
+  if (!c.hypotheses) return c;
+  c.hypotheses = c.hypotheses.filter((h) => h.id !== hypothesisId);
+  const now = new Date().toISOString();
+  c.updatedAt = now;
+  const actor = getAnalystProfile().name;
+
+  c.auditLog.push(
+    createChainedAuditEntry(
+      c.auditLog,
+      'HYPOTHESIS_DELETED',
+      actor,
+      `Deleted hypothesis [${hypothesisId}].`,
+      now
+    )
+  );
+
+  saveCases(cases);
+  return c;
 }

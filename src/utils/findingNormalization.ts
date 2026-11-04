@@ -130,8 +130,10 @@ export function normalizeFinding(raw: Partial<Finding>, caseId?: string): Findin
     confidenceLevel: raw.confidenceLevel || confidenceMeta.confidenceLevel,
     detectionMethod: raw.detectionMethod || confidenceMeta.detectionMethod,
     evidenceReference: raw.evidenceReference || confidenceMeta.evidenceReference,
-    potentialFalsePositiveExplanation: raw.potentialFalsePositiveExplanation || confidenceMeta.potentialFalsePositiveExplanation,
+    potentialFalsePositiveExplanation: raw.potentialFalsePositiveExplanation || raw.falsePositiveExplanation || confidenceMeta.potentialFalsePositiveExplanation,
+    falsePositiveExplanation: raw.falsePositiveExplanation || raw.potentialFalsePositiveExplanation || confidenceMeta.potentialFalsePositiveExplanation,
     recommendedNextStep: raw.recommendedNextStep || confidenceMeta.recommendedNextStep,
+    remediationGuide: raw.remediationGuide,
   };
 
   return finding;

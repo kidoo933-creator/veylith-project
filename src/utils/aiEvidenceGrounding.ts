@@ -362,12 +362,12 @@ export function classifyFindingConfidence(params: {
     return {
       verificationStatus: isDirect ? 'VERIFIED' : 'INFERRED',
       confidenceLevel: 'HIGH',
-      detectionMethod: params.detectionMethod || 'Direct HTTP/1.1 Socket Probe Response Inspection',
+      detectionMethod: params.detectionMethod || 'RFC 7230 HTTP Response Header Evaluation',
       evidenceReference: params.evidenceReference || 'HTTP Response Headers (Status 200 OK)',
       potentialFalsePositiveExplanation:
-        'Reverse proxies, WAFs, or single-page application routers may inject security headers exclusively on HTML routes, or client-side meta tags might define policies not present in raw transport headers.',
+        'Reverse proxies, WAFs, API endpoints, or single-page application routers may inject security headers exclusively on HTML routes, or client-side meta tags might define policies not present in raw transport headers.',
       recommendedNextStep:
-        'Verify headers on subpaths and API endpoints using curl -I. Apply the provided server configuration snippet.',
+        'Verify Content-Security-Policy and related security headers on subpaths and API endpoints using curl -I. Apply the provided server configuration snippet.',
     };
   }
 
@@ -388,12 +388,12 @@ export function classifyFindingConfidence(params: {
   // 3. High Entropy / Packed Payload
   if (titleLower.includes('entropy') || titleLower.includes('packed') || titleLower.includes('encryption')) {
     return {
-      verificationStatus: 'VERIFIED',
+      verificationStatus: 'INFERRED',
       confidenceLevel: 'MEDIUM',
       detectionMethod: params.detectionMethod || 'Shannon Entropy Calculation (Bits per Byte)',
       evidenceReference: params.evidenceReference || 'Whole-File & Sliding Block Entropy Scan',
       potentialFalsePositiveExplanation:
-        'Standard media formats (JPEG, MP4, PNG) and compressed data (ZIP, GZ) inherently exhibit high entropy (>7.2) without containing malicious payload.',
+        'Standard media formats (JPEG, MP4, PNG) and naturally compressed archives (ZIP, GZ) inherently exhibit high entropy (>7.2) without containing malicious payload.',
       recommendedNextStep:
         'Review sliding block entropy distribution to identify whether high entropy is uniform (compression) or localized to a single suspicious section (packer overlay).',
     };

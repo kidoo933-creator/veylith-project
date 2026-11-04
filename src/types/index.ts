@@ -56,11 +56,14 @@ export interface Finding {
   evidenceReference?: string; // Explicit evidence pointer (e.g. "DNS A Record: 93.184.216.34", "SHA-256 Hash")
   detectionMethod?: string; // Specific sensor/technique (e.g. "Direct Probe Observation", "Cryptographic Hash")
   potentialFalsePositiveExplanation?: string; // Explainable conditions that could trigger false positive
+  falsePositiveExplanation?: string; // Alias for UI compatibility
   recommendedNextStep?: string; // Concrete next step for investigator
+  remediationGuide?: FindingRemediationGuide;
 }
 
 export interface CaseRecord {
   id: string; // e.g. #VY-2025-0047
+  tenantId?: string; // Multi-tenant isolation boundary identifier
   title: string;
   description: string;
   priority: SeverityLevel;
@@ -89,8 +92,11 @@ export interface CaseRecord {
     actor: string;
     timestamp: string;
     details: string;
+    hash?: string;
+    prevHash?: string;
   }[];
   timeline?: any[];
+  hypotheses?: HypothesisItem[];
 }
 
 export type ProvenanceStatus =
@@ -388,7 +394,12 @@ export interface FileAnalysisResult {
   unavailableChecks: UnavailableCheck[];
   timestamp: string;
   simpleReport?: InvestigationSimpleReport;
+  embeddedArtifacts?: CarvedEmbeddedArtifact[];
+  suspiciousApis?: SuspiciousApiHit[];
+  archiveInspection?: ArchiveInspectionResult;
 }
+
+export type AudienceLevel = 'beginner' | 'analyst' | 'developer' | 'executive';
 
 export interface ChatMessage {
   id: string;
@@ -398,6 +409,7 @@ export interface ChatMessage {
   modelUsed?: string;
   roleName?: string;
   isFallback?: boolean;
+  audienceLevel?: AudienceLevel;
 }
 
 export interface PcapInterfaceInfo {
@@ -458,6 +470,10 @@ export interface PcapAnalysisResult {
   truncatedPacketsCount?: number;
   unsupportedLinkType?: boolean;
   simpleReport?: InvestigationSimpleReport;
+  tcpStreams?: TcpStreamSession[];
+  httpTransactions?: HttpTransaction[];
+  dnsTransactions?: DnsTransaction[];
+  tlsHandshakes?: TlsHandshakeMetadata[];
 }
 
 export interface CveItem {
@@ -488,4 +504,322 @@ export type ViewTab =
   | 'reports'
   | 'data-sources'
   | 'settings'
-  | 'android-project';
+  | 'android-project'
+  | 'timeline'
+  | 'mitre-attack'
+  | 'ioc-explorer';
+
+// ============================================================================
+// ADVANCED FORENSICS & INVESTIGATION EXPANSION TYPES
+// ============================================================================
+
+// 1. Advanced Timeline Types
+export type TimelineInconsistency =
+  | 'FutureDate'
+  | 'EpochZero'
+  | 'MissingTimezone'
+  | 'UncertainOrder'
+  | 'PostCaseClosure';
+
+export interface TimelineEvent {
+  id: string;
+  utcTimestamp: string;
+  originalTimestamp: string;
+  timezone?: string;
+  eventType: 'evidence' | 'finding' | 'audit' | 'pcap_packet' | 'file_timestamp' | 'hypothesis' | 'note';
+  source: string;
+  sourceId: string;
+  title: string;
+  description: string;
+  severity?: SeverityLevel;
+  confidence: ConfidenceLevel;
+  targetEntity?: string;
+  isInconsistent?: boolean;
+  inconsistencyType?: TimelineInconsistency;
+  inconsistencyDetails?: string;
+  tags?: string[];
+  metadata?: Record<string, any>;
+}
+
+// 2. MITRE ATT&CK Mapping Types
+export type MitreTactic =
+  | 'Initial Access'
+  | 'Execution'
+  | 'Persistence'
+  | 'Privilege Escalation'
+  | 'Defense Evasion'
+  | 'Credential Access'
+  | 'Discovery'
+  | 'Lateral Movement'
+  | 'Collection'
+  | 'Command and Control'
+  | 'Exfiltration'
+  | 'Impact';
+
+export interface MitreAttackTechnique {
+  id: string; // e.g. T1036
+  subId?: string; // e.g. T1036.005
+  name: string;
+  tactic: MitreTactic;
+  description: string;
+  detection: string;
+  mitigation: string;
+  url: string;
+  platforms?: string[];
+}
+
+export interface FindingMitreMapping {
+  findingId: string;
+  techniqueId: string;
+  techniqueName: string;
+  tactic: MitreTactic;
+  evidenceSupported: boolean;
+  isAiSuggested?: boolean;
+  confidence: ConfidenceLevel;
+  evidenceQuote?: string;
+  analystOverride?: {
+    status: 'accepted' | 'rejected' | 'modified';
+    analystNotes?: string;
+    overriddenBy?: string;
+    timestamp?: string;
+  };
+}
+
+// 3. Advanced IOC Extraction Types
+export type IocType =
+  | 'ipv4'
+  | 'ipv6'
+  | 'domain'
+  | 'url'
+  | 'email'
+  | 'hash_md5'
+  | 'hash_sha1'
+  | 'hash_sha256'
+  | 'filepath';
+
+export type IocValidationStatus =
+  | 'Benign'
+  | 'Suspicious'
+  | 'Malicious'
+  | 'Internal'
+  | 'Unverified';
+
+export interface ExtractedIoc {
+  id: string;
+  type: IocType;
+  rawValue: string;
+  normalizedValue: string;
+  defangedValue: string;
+  confidence: ConfidenceLevel;
+  validationStatus: IocValidationStatus;
+  statusRationale: string;
+  source: string;
+  sourceId: string;
+  extractedAt: string;
+  contextSnippet?: string;
+  tags?: string[];
+  isPrivateOrReserved?: boolean;
+}
+
+// 4. Investigation Hypothesis Workspace Types
+export type HypothesisStatus =
+  | 'Draft'
+  | 'Active'
+  | 'Supported'
+  | 'Refuted'
+  | 'Concluded';
+
+export interface HypothesisRevision {
+  timestamp: string;
+  analyst: string;
+  action: string;
+  changeSummary: string;
+}
+
+export interface HypothesisItem {
+  id: string;
+  caseId: string;
+  title: string;
+  premise: string;
+  status: HypothesisStatus;
+  confidence: 'High' | 'Medium' | 'Low';
+  supportingEvidenceIds: string[];
+  contradictingEvidenceIds: string[];
+  alternativeExplanations: string[];
+  openQuestions: string[];
+  nextSteps: string[];
+  isAiSuggested?: boolean;
+  author: string;
+  createdAt: string;
+  updatedAt: string;
+  revisions: HypothesisRevision[];
+}
+
+// 5. Advanced PCAP Reconstruction Types
+export interface TcpStreamSession {
+  streamId: number;
+  clientIp: string;
+  clientPort: number;
+  serverIp: string;
+  serverPort: number;
+  startTimeMs: number;
+  endTimeMs: number;
+  durationMs: number;
+  clientPackets: number;
+  serverPackets: number;
+  totalPackets: number;
+  clientBytes: number;
+  serverBytes: number;
+  totalBytes: number;
+  flags: {
+    synCount: number;
+    ackCount: number;
+    finCount: number;
+    rstCount: number;
+    pshCount: number;
+  };
+  isCompleteHandshake: boolean;
+  hasReset: boolean;
+  retransmissionCount: number;
+  appProtocol?: string;
+  payloadSnippet: string;
+}
+
+export interface HttpTransaction {
+  id: string;
+  streamId?: number;
+  method: string;
+  uri: string;
+  host?: string;
+  clientIp: string;
+  serverIp: string;
+  statusCode?: number;
+  statusText?: string;
+  contentType?: string;
+  requestHeaders: Record<string, string>;
+  responseHeaders?: Record<string, string>;
+  requestPayloadSnippet?: string;
+  responsePayloadSnippet?: string;
+  timestampMs: number;
+}
+
+export interface DnsTransaction {
+  id: string;
+  transactionId: string;
+  clientIp: string;
+  serverIp: string;
+  queryDomain: string;
+  queryType: string;
+  responseCode?: string;
+  answers: string[];
+  latencyMs?: number;
+  timestampMs: number;
+}
+
+export interface TlsHandshakeMetadata {
+  streamId?: number;
+  clientIp: string;
+  serverIp: string;
+  clientPort: number;
+  serverPort: number;
+  serverNameIndication?: string;
+  tlsVersion?: string;
+  cipherSuite?: string;
+  isSelfSigned?: boolean;
+  timestampMs: number;
+}
+
+// 6. File Forensics Enhancement Types
+export interface CarvedEmbeddedArtifact {
+  offset: number;
+  length: number;
+  detectedType: string;
+  magicHex: string;
+  entropy: number;
+  description: string;
+}
+
+export interface SuspiciousApiHit {
+  category: 'Process Injection' | 'Memory Modification' | 'Dynamic Invocation' | 'Network C2' | 'Anti-Debugging' | 'Persistence';
+  apiName: string;
+  description: string;
+  risk: 'High' | 'Medium' | 'Low';
+}
+
+export interface ArchiveInspectionResult {
+  isArchive: boolean;
+  entryCount: number;
+  totalDecompressedSize: number;
+  compressionRatio: number;
+  hasDirectoryTraversal: boolean;
+  traversalEntries: string[];
+  isRatioSuspicious: boolean;
+  entries: {
+    path: string;
+    compressedSize: number;
+    uncompressedSize: number;
+    isTraversal: boolean;
+  }[];
+}
+
+// 7. Investigation QA & Evidence Integrity Types
+export type QaCheckCategory =
+  | 'Provenance'
+  | 'Timestamps'
+  | 'Deduplication'
+  | 'Evidence Support'
+  | 'Consistency'
+  | 'Acquisition Completeness'
+  | 'Integrity'
+  | 'Severity Rationale';
+
+export interface QaIssue {
+  id: string;
+  category: QaCheckCategory;
+  severity: 'Critical' | 'Warning' | 'Notice';
+  title: string;
+  description: string;
+  targetId?: string;
+  targetType?: 'evidence' | 'finding' | 'audit' | 'case';
+  actionableRemediation: string;
+}
+
+export interface InvestigationQaReport {
+  overallHealthScore: number;
+  status: 'Clean' | 'Minor Issues' | 'Action Required';
+  totalChecks: number;
+  passedChecks: number;
+  issues: QaIssue[];
+  tamperVerified: boolean;
+  evaluatedAt: string;
+}
+
+// 8. Threat Intelligence Framework Types
+export type ThreatIntelFeedStatus = 'Online' | 'Cached' | 'Offline Fallback' | 'Unavailable';
+
+export interface ThreatIntelItem {
+  id: string;
+  type: 'cve' | 'technique' | 'ioc_reputation' | 'ransomware_campaign';
+  identifier: string;
+  title: string;
+  description: string;
+  severity: SeverityLevel;
+  sourceFeed: string;
+  retrievedAt: string;
+  confidence: ConfidenceLevel;
+  references: string[];
+  exploitKnown: boolean;
+  cisaKevDate?: string;
+  ransomwareCampaigns?: string[];
+}
+
+export interface ThreatIntelFeed {
+  id: string;
+  name: string;
+  description: string;
+  status: ThreatIntelFeedStatus;
+  lastUpdated: string;
+  itemCount: number;
+  isLocalCatalog: boolean;
+  sourceUrl?: string;
+}

@@ -3,6 +3,9 @@ import {
   BoundedMetadata,
   EntropyBlock,
   UnavailableCheck,
+  CarvedEmbeddedArtifact,
+  SuspiciousApiHit,
+  ArchiveInspectionResult,
 } from '../types';
 
 export const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB
@@ -729,6 +732,11 @@ export async function analyzeFile(file: File): Promise<FileAnalysisResult> {
   const stringsResult = extractPrintableStrings(bytes);
   const unavailableChecks = getUnavailableChecksList();
 
+  // Advanced file forensics extensions
+  const embeddedArtifacts = carveEmbeddedArtifacts(bytes);
+  const suspiciousApis = categorizeSuspiciousApis(stringsResult.extracted.map((s) => s.value));
+  const archiveInspection = inspectArchiveStructural(bytes);
+
   const formatSize = (sz: number) => {
     if (sz < 1024) return `${sz} B`;
     if (sz < 1024 * 1024) return `${(sz / 1024).toFixed(1)} KB`;
@@ -766,6 +774,9 @@ export async function analyzeFile(file: File): Promise<FileAnalysisResult> {
       : undefined,
     unavailableChecks,
     timestamp: new Date().toISOString(),
+    embeddedArtifacts,
+    suspiciousApis,
+    archiveInspection,
   };
 }
 
@@ -899,4 +910,229 @@ function computeFastMd5(bytes: Uint8Array): string {
   }
 
   return rhex(a) + rhex(b) + rhex(c) + rhex(d);
+}
+
+// Bounded Signature Carving for Embedded Droppers, Payloads, and Containers
+export function carveEmbeddedArtifacts(bytes: Uint8Array, maxArtifacts = 10): CarvedEmbeddedArtifact[] {
+  const artifacts: CarvedEmbeddedArtifact[] = [];
+  if (bytes.length < 64) return artifacts;
+
+  const limit = Math.min(bytes.length, 4 * 1024 * 1024);
+
+  for (let i = 1; i < limit - 16; i++) {
+    if (artifacts.length >= maxArtifacts) break;
+
+    // Embedded Windows PE (0x4D 0x5A)
+    if (bytes[i] === 0x4d && bytes[i + 1] === 0x5a && i + 64 < bytes.length) {
+      const peOff = bytes[i + 0x3c] | (bytes[i + 0x3d] << 8);
+      if (peOff > 0 && i + peOff + 4 < bytes.length && bytes[i + peOff] === 0x50 && bytes[i + peOff + 1] === 0x45) {
+        artifacts.push({
+          offset: i,
+          length: Math.min(bytes.length - i, 65536),
+          detectedType: 'Embedded PE / COFF Executable',
+          magicHex: '4D 5A',
+          entropy: computeEntropy(bytes.slice(i, Math.min(i + 1024, bytes.length))),
+          description: `Discovered embedded Windows Portable Executable at file offset 0x${i.toString(16).toUpperCase()}. Potential dropper payload.`,
+        });
+        i += 64;
+        continue;
+      }
+    }
+
+    // Embedded ELF (0x7F 'E' 'L' 'F')
+    if (bytes[i] === 0x7f && bytes[i + 1] === 0x45 && bytes[i + 2] === 0x4c && bytes[i + 3] === 0x46) {
+      artifacts.push({
+        offset: i,
+        length: Math.min(bytes.length - i, 65536),
+        detectedType: 'Embedded ELF Binary',
+        magicHex: '7F 45 4C 46',
+        entropy: computeEntropy(bytes.slice(i, Math.min(i + 1024, bytes.length))),
+        description: `Discovered embedded Linux ELF binary container at byte offset 0x${i.toString(16).toUpperCase()}.`,
+      });
+      i += 32;
+      continue;
+    }
+
+    // Embedded PDF (%PDF-)
+    if (bytes[i] === 0x25 && bytes[i + 1] === 0x50 && bytes[i + 2] === 0x44 && bytes[i + 3] === 0x46 && bytes[i + 4] === 0x2d) {
+      artifacts.push({
+        offset: i,
+        length: Math.min(bytes.length - i, 65536),
+        detectedType: 'Embedded PDF Document',
+        magicHex: '25 50 44 46',
+        entropy: computeEntropy(bytes.slice(i, Math.min(i + 1024, bytes.length))),
+        description: `Discovered embedded Adobe PDF stream at byte offset 0x${i.toString(16).toUpperCase()}.`,
+      });
+      i += 16;
+      continue;
+    }
+
+    // Embedded ZIP / PK (0x50 0x4B 0x03 0x04)
+    if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x03 && bytes[i + 3] === 0x04) {
+      artifacts.push({
+        offset: i,
+        length: Math.min(bytes.length - i, 65536),
+        detectedType: 'Embedded ZIP Archive',
+        magicHex: '50 4B 03 04',
+        entropy: computeEntropy(bytes.slice(i, Math.min(i + 1024, bytes.length))),
+        description: `Discovered embedded ZIP / PK compressed payload at byte offset 0x${i.toString(16).toUpperCase()}.`,
+      });
+      i += 30;
+      continue;
+    }
+
+    // Embedded PNG (0x89 'P' 'N' 'G')
+    if (bytes[i] === 0x89 && bytes[i + 1] === 0x50 && bytes[i + 2] === 0x4e && bytes[i + 3] === 0x47) {
+      artifacts.push({
+        offset: i,
+        length: Math.min(bytes.length - i, 65536),
+        detectedType: 'Embedded PNG Image',
+        magicHex: '89 50 4E 47',
+        entropy: computeEntropy(bytes.slice(i, Math.min(i + 1024, bytes.length))),
+        description: `Discovered embedded PNG graphic at byte offset 0x${i.toString(16).toUpperCase()}.`,
+      });
+      i += 16;
+      continue;
+    }
+  }
+
+  return artifacts;
+}
+
+// Heuristic categorization of dangerous native symbols and syscalls
+export function categorizeSuspiciousApis(extractedStrings: string[]): SuspiciousApiHit[] {
+  const hits: SuspiciousApiHit[] = [];
+  const seen = new Set<string>();
+
+  const API_CATALOG: { name: string; category: SuspiciousApiHit['category']; risk: 'High' | 'Medium' | 'Low'; desc: string }[] = [
+    // Process Injection
+    { name: 'VirtualAllocEx', category: 'Process Injection', risk: 'High', desc: 'Allocates memory in the address space of a remote process.' },
+    { name: 'WriteProcessMemory', category: 'Process Injection', risk: 'High', desc: 'Writes memory directly into another process address space.' },
+    { name: 'CreateRemoteThread', category: 'Process Injection', risk: 'High', desc: 'Spawns a thread inside a target process for code execution.' },
+    { name: 'QueueUserAPC', category: 'Process Injection', risk: 'High', desc: 'Queues an Asynchronous Procedure Call for stealth thread hijack.' },
+    { name: 'SetThreadContext', category: 'Process Injection', risk: 'High', desc: 'Modifies CPU registers of a target thread (process hollowing).' },
+
+    // Memory Modification
+    { name: 'VirtualAlloc', category: 'Memory Modification', risk: 'Medium', desc: 'Allocates dynamic virtual memory pages, often configured RWX.' },
+    { name: 'VirtualProtect', category: 'Memory Modification', risk: 'High', desc: 'Changes page permissions (frequently flipping RX to RWX).' },
+    { name: 'mprotect', category: 'Memory Modification', risk: 'High', desc: 'POSIX system call to modify memory protection flags.' },
+
+    // Dynamic Invocation
+    { name: 'LoadLibrary', category: 'Dynamic Invocation', risk: 'Low', desc: 'Dynamically loads a DLL module at runtime to evade static imports.' },
+    { name: 'GetProcAddress', category: 'Dynamic Invocation', risk: 'Medium', desc: 'Resolves function pointer addresses dynamically at runtime.' },
+    { name: 'WinExec', category: 'Dynamic Invocation', risk: 'High', desc: 'Legacy API to spawn arbitrary executable commands.' },
+    { name: 'ShellExecute', category: 'Dynamic Invocation', risk: 'Medium', desc: 'Executes an external application, script, or document.' },
+
+    // Network C2
+    { name: 'HttpSendRequest', category: 'Network C2', risk: 'Medium', desc: 'Sends an HTTP request to remote server over WinINet.' },
+    { name: 'InternetOpen', category: 'Network C2', risk: 'Low', desc: 'Initializes WinINet application session for network communication.' },
+    { name: 'URLDownloadToFile', category: 'Network C2', risk: 'High', desc: 'Downloads secondary payload directly from remote URL to disk.' },
+
+    // Anti-Debugging
+    { name: 'IsDebuggerPresent', category: 'Anti-Debugging', risk: 'Medium', desc: 'Queries Process Environment Block (PEB) BeingDebugged flag.' },
+    { name: 'CheckRemoteDebuggerPresent', category: 'Anti-Debugging', risk: 'Medium', desc: 'Checks if process is being debugged by another thread or tool.' },
+    { name: 'NtQueryInformationProcess', category: 'Anti-Debugging', risk: 'High', desc: 'Native API frequently queried for ProcessDebugPort to evade debuggers.' },
+    { name: 'ptrace', category: 'Anti-Debugging', risk: 'Medium', desc: 'Linux anti-debugging mechanism using PTRACE_TRACEME.' },
+
+    // Persistence
+    { name: 'RegSetValueEx', category: 'Persistence', risk: 'Medium', desc: 'Writes values to Windows Registry, commonly used for Run keys.' },
+    { name: 'CreateService', category: 'Persistence', risk: 'High', desc: 'Creates a system service for automated system-level persistence.' },
+  ];
+
+  for (const s of extractedStrings) {
+    for (const entry of API_CATALOG) {
+      if (s.toLowerCase().includes(entry.name.toLowerCase()) && !seen.has(entry.name)) {
+        seen.add(entry.name);
+        hits.push({
+          category: entry.category,
+          apiName: entry.name,
+          description: entry.desc,
+          risk: entry.risk,
+        });
+      }
+    }
+  }
+
+  return hits;
+}
+
+// Deep static archive structural parsing with Zip Slip and Zip Bomb guards
+export function inspectArchiveStructural(bytes: Uint8Array): ArchiveInspectionResult | undefined {
+  if (bytes.length < 30) return undefined;
+  // Local File Header Signature 0x50 0x4B 0x03 0x04
+  if (bytes[0] !== 0x50 || bytes[1] !== 0x4b || bytes[2] !== 0x03 || bytes[3] !== 0x04) {
+    return undefined;
+  }
+
+  const entries: { path: string; compressedSize: number; uncompressedSize: number; isTraversal: boolean }[] = [];
+  const traversalEntries: string[] = [];
+  let totalComp = 0;
+  let totalUncomp = 0;
+  let offset = 0;
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+  // Parse local headers bounded to 100 entries to prevent denial of service
+  while (offset + 30 <= bytes.length && entries.length < 100) {
+    if (bytes[offset] !== 0x50 || bytes[offset + 1] !== 0x4b || bytes[offset + 2] !== 0x03 || bytes[offset + 3] !== 0x04) {
+      break;
+    }
+
+    const compSize = dv.getUint32(offset + 18, true);
+    const uncompSize = dv.getUint32(offset + 22, true);
+    const nameLen = dv.getUint16(offset + 26, true);
+    const extraLen = dv.getUint16(offset + 28, true);
+
+    offset += 30;
+    if (offset + nameLen > bytes.length) break;
+
+    const nameBytes = bytes.slice(offset, offset + nameLen);
+    const nameStr = new TextDecoder('latin1', { fatal: false }).decode(nameBytes);
+    offset += nameLen + extraLen;
+
+    const isTraversal = nameStr.includes('../') || nameStr.includes('..\\');
+    if (isTraversal) {
+      traversalEntries.push(nameStr);
+    }
+
+    entries.push({
+      path: nameStr,
+      compressedSize: compSize,
+      uncompressedSize: uncompSize,
+      isTraversal,
+    });
+
+    totalComp += compSize;
+    totalUncomp += uncompSize;
+
+    if (compSize > 0 && offset + compSize <= bytes.length) {
+      offset += compSize;
+    } else {
+      let nextSig = -1;
+      for (let k = offset; k < Math.min(bytes.length - 4, offset + 2048); k++) {
+        if (bytes[k] === 0x50 && bytes[k + 1] === 0x4b && bytes[k + 2] === 0x03 && bytes[k + 3] === 0x04) {
+          nextSig = k;
+          break;
+        }
+      }
+      if (nextSig !== -1) {
+        offset = nextSig;
+      } else {
+        break;
+      }
+    }
+  }
+
+  const ratio = totalComp > 0 ? Number((totalUncomp / totalComp).toFixed(1)) : 1;
+  const isRatioSuspicious = ratio > 100 || (totalUncomp > 50 * 1024 * 1024 && totalComp < 1024 * 1024);
+
+  return {
+    isArchive: true,
+    entryCount: entries.length,
+    totalDecompressedSize: totalUncomp,
+    compressionRatio: ratio,
+    hasDirectoryTraversal: traversalEntries.length > 0,
+    traversalEntries,
+    isRatioSuspicious,
+    entries,
+  };
 }

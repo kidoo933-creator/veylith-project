@@ -1017,6 +1017,17 @@ export const FileForensicsView: React.FC<FileForensicsViewProps> = ({ onAttachEv
           )}
           </div>
         )}
+
+        {/* Embedded Gemini AI Forensics Copilot */}
+        <div className="pt-6 border-t border-slate-200 dark:border-slate-800">
+          <GeminiForensicsChat
+            activeCaseId={activeCaseId}
+            investigationContext={{
+              title: `Forensic File Analysis: ${result.fileName}`,
+              fileResult: result,
+            }}
+          />
+        </div>
         </div>
       )}
     </div>

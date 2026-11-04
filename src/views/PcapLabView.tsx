@@ -25,6 +25,7 @@ import {
   Lock,
   BookmarkCheck,
 } from 'lucide-react';
+import { GeminiForensicsChat } from '../components/GeminiForensicsChat';
 
 interface PcapLabViewProps {
   onAttachEvidence: (name: string, type: 'pcap', value: string, notes: string) => void;
@@ -547,6 +548,17 @@ export const PcapLabView: React.FC<PcapLabViewProps> = ({ onAttachEvidence, onLo
           )}
           </div>
         )}
+
+        {/* Embedded Gemini AI Forensics Copilot */}
+        <div className="pt-6 border-t border-slate-200 dark:border-slate-800">
+          <GeminiForensicsChat
+            activeCaseId={activeCaseId}
+            investigationContext={{
+              title: `PCAP Traffic Analysis: ${result.fileName}`,
+              pcapResult: result,
+            }}
+          />
+        </div>
         </div>
       )}
     </div>

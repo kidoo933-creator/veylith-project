@@ -20,6 +20,7 @@ import {
 
 interface GeminiForensicsChatProps {
   currentCase?: CaseRecord;
+  activeCaseId?: string;
   investigationContext?: any;
   isCompact?: boolean;
 }
@@ -29,6 +30,7 @@ type ModelChoice = 'gemini-3.8-flash' | 'gemini-3.1-flash-lite' | 'gemini-4-argo
 
 export const GeminiForensicsChat: React.FC<GeminiForensicsChatProps> = ({
   currentCase,
+  activeCaseId,
   investigationContext,
   isCompact = false,
 }) => {
@@ -37,19 +39,37 @@ export const GeminiForensicsChat: React.FC<GeminiForensicsChatProps> = ({
   const [inputMessage, setInputMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [geminiActive, setGeminiActive] = useState<boolean | null>(null);
 
-  const targetLabel = investigationContext?.domain || currentCase?.id || 'Active Investigation';
+  useEffect(() => {
+    fetch('/api/health')
+      .then((res) => res.json())
+      .then((data) => {
+        setGeminiActive(Boolean(data.geminiConfigured));
+      })
+      .catch(() => {
+        setGeminiActive(false);
+      });
+  }, []);
+
+  const targetLabel =
+    investigationContext?.domain ||
+    investigationContext?.fileResult?.fileName ||
+    investigationContext?.pcapResult?.fileName ||
+    currentCase?.id ||
+    activeCaseId ||
+    'Active Investigation';
 
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 'init-1',
       role: 'model',
-      content: `Greetings Analyst. I am Veylith AI Copilot, specialized for digital forensics, infrastructure hardening, and defensible incident correlation.
+      content: `Greetings Analyst. I am Veylith Forensics Copilot, specialized for digital forensics, infrastructure hardening, and defensible incident correlation.
 
 Currently active context: **${targetLabel}** (${currentCase?.evidence?.length || 0} evidence artifacts tracked).
 Ask any question regarding web server hardening (Nginx / Apache / Express), curl verification commands, Shannon entropy, Android APKs, or network telemetry anomalies.`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      modelUsed: 'gemini-3.8-flash',
+      modelUsed: 'Veylith Forensics Core',
       roleName: 'Threat Intel & Infrastructure Analyst',
     },
   ]);
@@ -104,6 +124,26 @@ Ask any question regarding web server hardening (Nginx / Apache / Express), curl
         `Generate curl commands to verify domain security for ${d}`,
         `Explain real-world attack scenarios for ${d} without headers`,
         `Why are missing HTTP headers classified as Low severity?`,
+      ];
+    }
+
+    if (investigationContext?.fileResult) {
+      const fr = investigationContext.fileResult;
+      return [
+        `Analyze the Shannon entropy (${fr.entropy !== undefined ? fr.entropy.toFixed(2) : 'N/A'}) of ${fr.fileName}.`,
+        `Assess format masquerading risks for ${fr.detectedFormat || 'unknown format'} vs extension.`,
+        `Draft a YARA rule to detect binary patterns matching ${fr.fileName}.`,
+        `What defensive remediation is recommended for high entropy executable sections?`,
+      ];
+    }
+
+    if (investigationContext?.pcapResult) {
+      const pr = investigationContext.pcapResult;
+      return [
+        `Analyze protocol distribution and conversation pairs for ${pr.fileName}.`,
+        `How do I verify if high SYN/ACK ratios indicate an unauthorized port scan?`,
+        `Generate iptables perimeter drop rules for anomalous network endpoints.`,
+        `Assess risks of unencrypted HTTP/DNS payload observed in captured frames.`,
       ];
     }
 
@@ -304,10 +344,21 @@ Ask any question regarding web server hardening (Nginx / Apache / Express), curl
             </div>
             <div>
               <h3 className="text-xs md:text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                Gemini Forensics Multi-Turn Copilot
-                <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${roleMeta[role].badgeColor}`}>
-                  {modelPreference}
-                </span>
+                Forensics Copilot
+                {geminiActive ? (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800 flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    Gemini Active ({modelPreference})
+                  </span>
+                ) : (
+                  <span
+                    className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border-slate-300 dark:border-slate-700 flex items-center gap-1.5"
+                    title="Operating offline using deterministic DFIR rule-based intelligence"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+                    Deterministic Core (Offline)
+                  </span>
+                )}
               </h3>
               <p className="text-[11px] text-slate-400">
                 Grounding in case <span className="font-mono text-slate-700 dark:text-slate-300 font-semibold">{currentCase?.id || 'Active Workspace'}</span> ({currentCase?.evidence.length || 0} evidence items)
@@ -413,10 +464,18 @@ Ask any question regarding web server hardening (Nginx / Apache / Express), curl
                 {!isUser && (
                   <div className="flex items-center justify-between gap-2 pb-1 border-b border-slate-200/60 dark:border-slate-700/60 text-[10px]">
                     <div className="flex items-center gap-1.5 font-semibold text-slate-600 dark:text-slate-300">
-                      <span>{m.roleName || 'Veylith AI'}</span>
+                      <span>{m.roleName || 'Veylith Core'}</span>
                       {m.modelUsed && (
-                        <span className="font-mono text-[9px] px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300">
-                          {m.modelUsed}
+                        <span
+                          className={`font-mono text-[9px] px-1.5 py-0.2 rounded border ${
+                            m.isFallback || m.modelUsed.includes('Fallback') || m.modelUsed.includes('Deterministic') || m.modelUsed.includes('Core')
+                              ? 'bg-amber-50 text-amber-800 dark:bg-amber-950/70 dark:text-amber-300 border-amber-300 dark:border-amber-800'
+                              : 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
+                          }`}
+                        >
+                          {m.isFallback || m.modelUsed.includes('Fallback') || m.modelUsed.includes('Deterministic') || m.modelUsed.includes('Core')
+                            ? 'Deterministic DFIR Core'
+                            : `Gemini (${m.modelUsed})`}
                         </span>
                       )}
                     </div>

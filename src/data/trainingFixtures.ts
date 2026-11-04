@@ -149,6 +149,42 @@ export const TRAINING_SCENARIO_CASES: CaseRecord[] = [
         details: 'Correlated domain malicious-site.net with IP 192.0.2.45.',
       },
     ],
+    hypotheses: [
+      {
+        id: 'HYP-0047-01',
+        caseId: '#VY-2025-0047',
+        title: 'Initial Access via Invoice Phishing Stager',
+        premise: 'Adversary delivered masqueraded PE binary (invoice_update.exe) disguised as PDF via spearphishing email to establish initial footprint.',
+        status: 'Supported',
+        confidence: 'High',
+        supportingEvidenceIds: ['ev-1', 'ev-2'],
+        contradictingEvidenceIds: [],
+        alternativeExplanations: [
+          'User intentionally downloaded administrative update tool that shares filename conventions.',
+          'Binary represents legitimate internal billing software compiled with custom installer.',
+        ],
+        openQuestions: [
+          'Did invoice_update.exe execute with administrative privileges or under unprivileged user context?',
+          'Was persistence established in Registry Run keys prior to network beaconing?',
+        ],
+        nextSteps: [
+          'Extract printable strings from invoice_update.exe to inspect embedded C2 URLs.',
+          'Correlate endpoint process start time with PCAP TCP connection timestamp.',
+        ],
+        isAiSuggested: false,
+        author: 'Lead DFIR Analyst',
+        createdAt: '2025-04-21T10:30:00Z',
+        updatedAt: '2025-04-21T11:45:00Z',
+        revisions: [
+          {
+            timestamp: '2025-04-21T10:30:00Z',
+            analyst: 'Lead DFIR Analyst',
+            action: 'Hypothesis Created',
+            changeSummary: 'Formulated stager delivery hypothesis linked to ev-1 and ev-2.',
+          },
+        ],
+      },
+    ],
   },
   {
     id: '#VY-2025-0048',

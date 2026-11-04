@@ -35,6 +35,7 @@ import {
   validateAiDomainAnalysis,
   generateDeterministicDomainAnalysis,
 } from './src/utils/domainAiAnalyst.ts';
+import { generateDeterministicChatReply } from './src/utils/aiCopilotService.ts';
 
 // Health and Status API
 app.get('/api/health', (req, res) => {
@@ -494,6 +495,21 @@ Guidelines:
 - Help the analyst prioritize indicators for firewall/EDR blocklisting.`;
   }
 
+  // Append explanation level & anti-hallucination guidelines
+  systemInstruction += `\n\nEXPLANATION STYLES & PERSPECTIVES:
+- Beginner / Simple English: When asked for simple English, no cybersecurity jargon, or beginner explanations, use clear everyday metaphors (e.g., house locks, sealed envelopes) and state priority actions clearly.
+- Analyst Perspective: Explicitly distinguish between CONFIRMED/VERIFIED observations and INFERRED deductions. Cites potential false positives and explicit limitations.
+- Developer Perspective: Provide syntactically valid configuration directives (Nginx, Apache, Express, Cloudflare), cite exact file paths, note potential breaking changes, and include curl verification commands.
+- Executive Perspective: Focus on business risk, regulatory compliance implications, and prioritized action plans.
+
+ANTI-HALLUCINATION & EVIDENCE GROUNDING (CRITICAL DEFENSIVE BOUNDARIES):
+1. Never invent CVEs, exploit payloads, malicious IPs, or scan results not present in current case evidence.
+2. If asked what CVEs affect a domain when none were retrieved, state clearly that zero CVEs are documented in case evidence and refuse to speculate.
+3. If asked whether a domain is compromised when only headers were missing, clarify that missing security headers represent a hardening deficiency, NOT an active compromise or intrusion.
+4. If asked for an exploit or weaponized code, state that Veylith is a defensive forensics platform and does not generate active exploits; provide non-destructive verification curl checks instead.
+5. If asked if a file is malware based on high entropy, explain that high entropy indicates byte randomness or compression, not proof of malware without corroborating malicious indicators.
+6. If asked if periodic PCAP traffic is C2, explain that periodic intervals can indicate legitimate synchronization (NTP, keep-alives) and that C2 requires corroborating beacon analysis.`;
+
   // Include active case and investigation context if provided
   if (activeCase) {
     systemInstruction += `\n\nCURRENT ACTIVE INVESTIGATION CONTEXT:
@@ -511,11 +527,36 @@ ${JSON.stringify(activeCase.findings || [], null, 2)}`;
 ${JSON.stringify(investigationContext, null, 2)}`;
   }
 
-  // Format messages into Gemini contents structure
-  const contents = messages.map((m: { role: string; content: string }) => ({
-    role: m.role === 'model' ? 'model' : 'user',
-    parts: [{ text: m.content }],
-  }));
+  // Gemini API requires the first turn to have role 'user' and alternates user/model
+  const validMessages = messages.filter(
+    (m: any) => m && m.content && typeof m.content === 'string' && m.content.trim().length > 0
+  );
+
+  // Strip leading model messages (such as greeting messages)
+  let startIndex = 0;
+  while (startIndex < validMessages.length && validMessages[startIndex].role === 'model') {
+    startIndex++;
+  }
+
+  const prunedMessages = validMessages.slice(startIndex);
+  const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
+
+  for (const msg of prunedMessages) {
+    const role: 'user' | 'model' = msg.role === 'model' ? 'model' : 'user';
+    if (contents.length > 0 && contents[contents.length - 1].role === role) {
+      // Merge consecutive same-role messages
+      contents[contents.length - 1].parts[0].text += `\n\n${msg.content}`;
+    } else {
+      contents.push({ role, parts: [{ text: msg.content }] });
+    }
+  }
+
+  if (contents.length === 0) {
+    contents.push({
+      role: 'user',
+      parts: [{ text: 'Please summarize the active case findings and key forensic indicators.' }],
+    });
+  }
 
   if (!process.env.GEMINI_API_KEY) {
     return res.status(200).json({
@@ -572,148 +613,7 @@ ${JSON.stringify(investigationContext, null, 2)}`;
   }
 });
 
-function generateDeterministicChatReply(
-  messages: any[],
-  roleId?: string,
-  activeCase?: any,
-  investigationContext?: any
-): string {
-  const lastUserMsg = (messages[messages.length - 1]?.content || '').toLowerCase();
-  const evidenceCount = activeCase?.evidence?.length || 0;
-  const caseId = activeCase?.id || 'Active Investigation';
-  const targetDomain = investigationContext?.domain || 'example.com';
-
-  // 1. Web Server Hardening & Configuration Queries
-  if (lastUserMsg.includes('nginx') || (lastUserMsg.includes('header') && lastUserMsg.includes('config'))) {
-    return `### Nginx Security Hardening Directives
-
-To enforce baseline browser security boundaries in Nginx, add the following headers to your server block in \`/etc/nginx/conf.d/security.conf\` (or \`/etc/nginx/sites-available/default\`):
-
-\`\`\`nginx
-# Security Hardening Directives
-add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self';" always;
-add_header X-Frame-Options "SAMEORIGIN" always;
-add_header X-Content-Type-Options "nosniff" always;
-add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
-add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
-\`\`\`
-
-**Verification Command**:
-\`\`\`bash
-nginx -t && systemctl reload nginx
-curl -I https://${targetDomain} | grep -Ei "content-security-policy|x-frame-options|x-content-type-options|strict-transport-security"
-\`\`\`
-
-*Analyst Note*: Verify that HTTPS functions across all subdomains prior to enabling \`includeSubDomains\` on HSTS.`;
-  }
-
-  if (lastUserMsg.includes('apache')) {
-    return `### Apache HTTP Server Hardening Directives
-
-Add the following to \`/etc/apache2/conf-available/security.conf\` or your site's \`.htaccess\` file (requires \`mod_headers\`):
-
-\`\`\`apache
-<IfModule mod_headers.c>
-  Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; object-src 'none';"
-  Header always set X-Frame-Options "SAMEORIGIN"
-  Header always set X-Content-Type-Options "nosniff"
-  Header always set Referrer-Policy "strict-origin-when-cross-origin"
-  Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
-  Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-</IfModule>
-\`\`\`
-
-**Verification**:
-\`\`\`bash
-a2enmod headers && systemctl restart apache2
-curl -I https://${targetDomain}
-\`\`\``;
-  }
-
-  if (lastUserMsg.includes('curl') || lastUserMsg.includes('verify')) {
-    return `### Live Forensic Verification Commands
-
-Use these defensible \`curl\` commands to inspect response headers and TLS certificates without rendering browser DOM:
-
-\`\`\`bash
-# 1. Inspect HTTP Headers and Status Codes
-curl -I -sS -L https://${targetDomain}
-
-# 2. Filter for Security Hardening Headers specifically
-curl -I https://${targetDomain} 2>&1 | grep -Ei "strict-transport-security|content-security-policy|x-frame-options|x-content-type-options|referrer-policy|permissions-policy|server"
-
-# 3. Test for SSL/TLS Protocol and Certificate Expiration
-openssl s_client -connect ${targetDomain}:443 -servername ${targetDomain} < /dev/null 2>/dev/null | openssl x509 -noout -dates -issuer -subject
-
-# 4. Check DNS Authoritative Records
-dig +short ${targetDomain} A && dig +short ${targetDomain} AAAA
-\`\`\``;
-  }
-
-  // 2. Attack Scenarios & Risk Explanations
-  if (lastUserMsg.includes('attack') || lastUserMsg.includes('scenario') || lastUserMsg.includes('clickjack') || lastUserMsg.includes('xss')) {
-    return `### Educational Attack Scenario Analysis
-
-#### 1. Clickjacking (Absence of X-Frame-Options / CSP frame-ancestors)
-- **Mechanism**: An adversary creates a deceptive website (\`attacker.example\`) that embeds \`${targetDomain}\` inside a transparent iframe overlaying an enticing UI element (e.g. "Play Video" or "Claim Voucher").
-- **Impact**: When the authenticated user clicks, the click is intercepted by a sensitive button on the embedded site (e.g. "Authorize Transfer" or "Delete Account").
-- **Mitigation**: \`X-Frame-Options: SAMEORIGIN\` or CSP \`frame-ancestors 'self'\`.
-
-#### 2. Cross-Site Scripting (XSS) Amplification (Absence of CSP)
-- **Mechanism**: If an injection flaw exists in input forms, the lack of CSP permits injected JavaScript to execute and load remote scripts from adversary C2 servers.
-- **Mitigation**: Strict \`Content-Security-Policy\` restricting script sources to \`'self'\` and forbidding inline evaluation.
-
-#### 3. SSL Stripping (Absence of HSTS)
-- **Mechanism**: An adversary on local Wi-Fi intercepts the user's initial plaintext \`http://\` request, serving a spoofed plaintext page before the HTTPS redirect finishes.
-- **Mitigation**: Enforce \`Strict-Transport-Security\` with a 1-year duration (\`max-age=31536000\`).`;
-  }
-
-  // 3. Shannon Entropy & Reverse Engineering
-  if (lastUserMsg.includes('entropy') || lastUserMsg.includes('packer') || lastUserMsg.includes('packed')) {
-    return `### Shannon Entropy Forensic Analysis
-- **Definition**: Shannon entropy measures byte unpredictability from 0.000 to 8.000 bits per byte.
-- **Diagnostic Thresholds**:
-  - \`0.00 - 3.00\`: Highly uniform data (sparse files, zero-filled buffers, ASCII text).
-  - \`3.00 - 6.50\`: Typical compiled code (PE x86/x64 opcodes, ELF sections, uncompressed scripts).
-  - \`7.20 - 8.00\`: High randomness (encrypted data or compressed blocks).
-- **Forensic Caveat**: Legitimate compressed formats (ZIP, PNG, JPEG, MP4) naturally show entropy >7.5. High entropy alone is NEVER conclusive proof of malicious intent. Correlate entropy with file extension, PE section names (\`.upx\`, \`.themida\`), and import table scarcity.`;
-  }
-
-  // 4. Android APK Forensics
-  if (lastUserMsg.includes('apk') || lastUserMsg.includes('android')) {
-    return `### Android APK Static Triage Overview
-- **Structure**: APK packages are ZIP archives containing \`AndroidManifest.xml\`, \`classes.dex\`, resources, and native \`lib/\` binaries.
-- **High-Risk Permission Flags**:
-  - \`SYSTEM_ALERT_WINDOW\`: Screen overlays enabling deceptive credential harvesting.
-  - \`READ_SMS\` / \`SEND_SMS\`: Interception of banking OTP and 2FA SMS tokens.
-  - \`REQUEST_INSTALL_PACKAGES\`: Secondary payload dropper mechanism.
-  - \`RECORD_AUDIO\` / \`ACCESS_FINE_LOCATION\`: Unsanctioned telemetry collection.
-- **Integrity Rule**: Always verify the APK signing certificate (v1/v2/v3 scheme) and check if \`android:debuggable="true"\` is exposed.`;
-  }
-
-  // 5. PCAP & Network Telemetry
-  if (lastUserMsg.includes('pcap') || lastUserMsg.includes('packet') || lastUserMsg.includes('syn') || lastUserMsg.includes('tunneling') || lastUserMsg.includes('beacon')) {
-    return `### Network Packet Forensics (PCAP) Analysis
-- **TCP Flag Triage**:
-  - High ratio of \`SYN\` packets without completing 3-way handshakes indicates SYN flood denial-of-service or port reconnaissance.
-  - High \`RST\` packet frequency indicates closed service rejection or abrupt connection teardown.
-- **C2 Beaconing Detection**:
-  - Identify persistent outbound HTTP/TLS connections occurring at regular periodic intervals (low jitter, e.g. every 60s ± 2s).
-- **DNS Tunneling Indicators**:
-  - Unusually long TXT or A record subdomain queries (e.g. \`[base64].sub.example.com\`) with high query frequency and atypical character sets.
-- **Verification Rule**: Never decrypt payload content without legal authorization and proper cryptographic key escrow.`;
-  }
-
-  // 6. Active Case Evidence Correlation
-  return `### Veylith Forensic Advisory [${caseId}]
-- **Active Case Scope**: Tracking ${evidenceCount} evidence items.
-- **Defensible Evidence Standard**: Findings are stratified as Observed, Confirmed, Inferred, Potential, or Unknown.
-- **Prioritized Recommendations**:
-  1. Maintain cryptographic integrity by validating SHA-256 hashes for all physical and disk images.
-  2. For external infrastructure, deploy baseline browser hardening headers (CSP, XFO, XCTO, HSTS) and verify via \`curl -I\`.
-  3. For suspect endpoints, acquire volatile RAM images prior to rebooting or applying destructive containment.`;
-}
+export { generateDeterministicChatReply };
 
 function generateDeterministicInvestigationSummary(objective: string, scope: any, evidence: any[], notice?: string) {
   const count = evidence?.length || 0;

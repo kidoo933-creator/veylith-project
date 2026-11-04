@@ -1,4 +1,13 @@
-import { PcapAnalysisResult, PcapInterfaceInfo, PcapPacket, SeverityLevel } from '../types';
+import {
+  PcapAnalysisResult,
+  PcapInterfaceInfo,
+  PcapPacket,
+  SeverityLevel,
+  TcpStreamSession,
+  HttpTransaction,
+  DnsTransaction,
+  TlsHandshakeMetadata,
+} from '../types';
 
 export function getLinkTypeName(lt: number): string {
   if (lt === 1) return 'Ethernet (10Mb/100Mb/1Gb/10Gb)';
@@ -481,12 +490,29 @@ export function parsePcapFile(buffer: ArrayBuffer | ArrayBufferLike, fileName: s
     });
   }
 
-  const durationSeconds = maxTime > minTime ? Number(((maxTime - minTime) / 1000).toFixed(2)) : 1;
+    const durationSeconds = maxTime > minTime ? Number(((maxTime - minTime) / 1000).toFixed(2)) : 1;
   const avgPacketRate = Number((packets.length / Math.max(durationSeconds, 1)).toFixed(2));
 
   const topConversations = Array.from(conversationsMap.values())
     .sort((a, b) => b.bytes - a.bytes)
     .slice(0, 10);
+
+  // Advanced stream and transaction reconstructions
+  const tcpStreams = reconstructTcpStreams(packets);
+  const httpTransactions = reconstructHttpTransactions(packets);
+  const dnsTransactions = reconstructDnsTransactions(packets);
+  const tlsHandshakes = extractTlsHandshakes(packets);
+
+  // Advanced flow heuristics: Check for incomplete TCP handshakes
+  const incompleteHandshakes = tcpStreams.filter((s) => s.flags.synCount > 0 && !s.isCompleteHandshake);
+  if (tcpStreams.length >= 6 && incompleteHandshakes.length / tcpStreams.length > 0.6) {
+    anomalies.push({
+      severity: 'Medium',
+      title: 'High Ratio of Incomplete TCP Handshakes',
+      description: `${incompleteHandshakes.length} of ${tcpStreams.length} recorded TCP streams did not complete the 3-way handshake (SYN -> SYN/ACK -> ACK). Characteristic of reconnaissance scans or dropped connections.`,
+      evidence: `Incomplete streams: ${incompleteHandshakes.length}/${tcpStreams.length} (${(incompleteHandshakes.length / tcpStreams.length * 100).toFixed(0)}%)`,
+    });
+  }
 
   return {
     fileName,
@@ -505,6 +531,10 @@ export function parsePcapFile(buffer: ArrayBuffer | ArrayBufferLike, fileName: s
     linkTypeName,
     truncatedPacketsCount,
     unsupportedLinkType,
+    tcpStreams,
+    httpTransactions,
+    dnsTransactions,
+    tlsHandshakes,
   };
 }
 
@@ -711,7 +741,7 @@ function decodeFrame(
 }
 
 // Generate realistic synthetic PCAP files for instant in-browser testing
-export function generateSamplePcap(type: 'c2-beacon' | 'dns-tunnel' | 'web-traffic'): ArrayBuffer {
+export function generateSamplePcap(type: 'c2-beacon' | 'dns-tunnel' | 'web-traffic' | 'cleartext-auth' = 'web-traffic'): ArrayBuffer {
   // Build a valid 24-byte PCAP header + realistic frames
   const packets: Uint8Array[] = [];
 
@@ -721,17 +751,22 @@ export function generateSamplePcap(type: 'c2-beacon' | 'dns-tunnel' | 'web-traff
       packets.push(createSyntheticTcpPacket('192.168.1.105', '198.51.100.42', 49152 + i, 443, 'TLS [PSH, ACK] Application Data Encrypted Beacon (256 bytes)'));
     }
   } else if (type === 'dns-tunnel') {
-    // High-entropy DNS TXT staging
+    // High-entropy DNS TXT staging (> 40 chars & hex string for tunneling detection)
     const payloads = [
-      'Query: a8f93c0192e4b3.c2stage.malicious-network.org',
-      'Query: 8812bf0092c10398f.c2stage.malicious-network.org',
-      'Query: f70912ab00c3de458.c2stage.malicious-network.org',
-      'Query: 99120489acbd78104.c2stage.malicious-network.org',
-      'Query: b890f3319803caef1.c2stage.malicious-network.org',
+      'Query: a8f93c0192e4b3c4d5e6f7a8b9c0d1e2f3a4b5.c2stage.malicious-network.org',
+      'Query: 8812bf0092c10398fa1b2c3d4e5f60718293a4.c2stage.malicious-network.org',
+      'Query: f70912ab00c3de458b901a2b3c4d5e6f708192.c2stage.malicious-network.org',
+      'Query: 99120489acbd78104deadbeef1234567890abcdef.c2stage.malicious-network.org',
+      'Query: b890f3319803caef1fedcba09876543210fedcba.c2stage.malicious-network.org',
     ];
     for (let i = 0; i < 20; i++) {
       packets.push(createSyntheticUdpDnsPacket('192.168.1.45', '8.8.8.8', payloads[i % payloads.length]));
     }
+  } else if (type === 'cleartext-auth') {
+    // Cleartext Basic Authentication and FTP credentials over unencrypted channels
+    packets.push(createSyntheticTcpPacket('10.0.0.15', '192.168.1.1', 54321, 80, 'GET /admin/dashboard HTTP/1.1\r\nHost: router.local\r\nAuthorization: Basic YWRtaW46U2VjcmV0MTIzIQ==\r\n\r\n'));
+    packets.push(createSyntheticTcpPacket('192.168.1.1', '10.0.0.15', 80, 54321, 'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<h1>Admin Dashboard</h1>'));
+    packets.push(createSyntheticTcpPacket('10.0.0.15', '192.168.1.1', 54322, 21, 'USER administrator\r\nPASS Winter2024!\r\n'));
   } else {
     // Normal HTTP/HTTPS
     for (let i = 0; i < 15; i++) {
@@ -773,7 +808,7 @@ export function generateSamplePcap(type: 'c2-beacon' | 'dns-tunnel' | 'web-traff
   return outBuf;
 }
 
-function createSyntheticTcpPacket(srcIp: string, dstIp: string, srcPort: number, dstPort: number, info: string): Uint8Array {
+export function createSyntheticTcpPacket(srcIp: string, dstIp: string, srcPort: number, dstPort: number, info: string): Uint8Array {
   const enc = new TextEncoder().encode(info);
   const pkt = new Uint8Array(54 + enc.length);
   // Eth
@@ -801,11 +836,23 @@ function createSyntheticTcpPacket(srcIp: string, dstIp: string, srcPort: number,
   return pkt;
 }
 
-function createSyntheticUdpDnsPacket(srcIp: string, dstIp: string, queryStr: string): Uint8Array {
-  const pkt = new Uint8Array(72);
+export function createSyntheticUdpDnsPacket(srcIp: string, dstIp: string, queryStr: string): Uint8Array {
+  const qClean = queryStr.replace(/^Query:\s*/i, '');
+  const parts = qClean.split('.').filter(Boolean);
+  let qLen = 1; // null terminator
+  for (const part of parts) {
+    qLen += 1 + part.length;
+  }
+  const totalIpLen = 20 + 8 + 12 + qLen + 4; // IPv4 + UDP + DNS header + query labels + Qtype/Qclass
+  const totalFrameLen = 14 + totalIpLen; // + 14 Ethernet header
+  const pkt = new Uint8Array(totalFrameLen);
+  // Eth
   pkt[12] = 0x08;
   pkt[13] = 0x00;
+  // IPv4
   pkt[14] = 0x45;
+  pkt[16] = (totalIpLen >> 8) & 0xff;
+  pkt[17] = totalIpLen & 0xff;
   pkt[23] = 17; // UDP
   const src = srcIp.split('.').map(Number);
   const dst = dstIp.split('.').map(Number);
@@ -816,17 +863,275 @@ function createSyntheticUdpDnsPacket(srcIp: string, dstIp: string, queryStr: str
   pkt[35] = 0x01;
   pkt[36] = 0x00;
   pkt[37] = 0x35; // 53
+  const udpLen = 8 + 12 + qLen + 4;
+  pkt[38] = (udpLen >> 8) & 0xff;
+  pkt[39] = udpLen & 0xff;
   // DNS Header
   pkt[42] = 0x01; // 1 Question
   // Encode query into packet
-  const parts = queryStr.replace('Query: ', '').split('.');
   let curr = 54;
   for (const part of parts) {
-    if (curr + part.length + 1 >= pkt.length) break;
     pkt[curr++] = part.length;
     for (let c = 0; c < part.length; c++) {
       pkt[curr++] = part.charCodeAt(c);
     }
   }
+  pkt[curr++] = 0x00; // end of name
+  // QTYPE A
+  pkt[curr++] = 0x00;
+  pkt[curr++] = 0x01;
+  // QCLASS IN
+  pkt[curr++] = 0x00;
+  pkt[curr++] = 0x01;
+
   return pkt;
+}
+
+export function reconstructTcpStreams(packets: PcapPacket[]): TcpStreamSession[] {
+  const streamMap = new Map<string, {
+    clientIp: string;
+    clientPort: number;
+    serverIp: string;
+    serverPort: number;
+    startTimeMs: number;
+    endTimeMs: number;
+    clientPackets: number;
+    serverPackets: number;
+    clientBytes: number;
+    serverBytes: number;
+    synCount: number;
+    ackCount: number;
+    finCount: number;
+    rstCount: number;
+    pshCount: number;
+    clientSyn: boolean;
+    serverSynAck: boolean;
+    clientAck: boolean;
+    appProtocol?: string;
+    payloads: string[];
+  }>();
+
+  let nextStreamId = 1;
+  const streamIdMap = new Map<string, number>();
+
+  for (const pkt of packets) {
+    if (pkt.protocol !== 'TCP' || !pkt.srcIp || !pkt.dstIp || !pkt.srcPort || !pkt.dstPort) continue;
+
+    const pairKey = [
+      `${pkt.srcIp}:${pkt.srcPort}`,
+      `${pkt.dstIp}:${pkt.dstPort}`,
+    ].sort().join(' <-> ');
+
+    let stream = streamMap.get(pairKey);
+    if (!stream) {
+      stream = {
+        clientIp: pkt.srcIp,
+        clientPort: pkt.srcPort,
+        serverIp: pkt.dstIp,
+        serverPort: pkt.dstPort,
+        startTimeMs: pkt.timestamp || 0,
+        endTimeMs: pkt.timestamp || 0,
+        clientPackets: 0,
+        serverPackets: 0,
+        clientBytes: 0,
+        serverBytes: 0,
+        synCount: 0,
+        ackCount: 0,
+        finCount: 0,
+        rstCount: 0,
+        pshCount: 0,
+        clientSyn: false,
+        serverSynAck: false,
+        clientAck: false,
+        appProtocol: pkt.appProtocol,
+        payloads: [],
+      };
+      streamMap.set(pairKey, stream);
+      streamIdMap.set(pairKey, nextStreamId++);
+    }
+
+    if (pkt.timestamp > stream.endTimeMs) stream.endTimeMs = pkt.timestamp;
+    if (pkt.timestamp < stream.startTimeMs || stream.startTimeMs === 0) stream.startTimeMs = pkt.timestamp;
+
+    const isFromClient = pkt.srcIp === stream.clientIp && pkt.srcPort === stream.clientPort;
+    if (isFromClient) {
+      stream.clientPackets++;
+      stream.clientBytes += pkt.length;
+    } else {
+      stream.serverPackets++;
+      stream.serverBytes += pkt.length;
+    }
+
+    const info = pkt.info || '';
+    if (info.includes('[SYN]') && !info.includes('ACK')) {
+      stream.synCount++;
+      if (isFromClient) stream.clientSyn = true;
+    } else if (info.includes('[SYN, ACK]') || (info.includes('SYN') && info.includes('ACK'))) {
+      stream.synCount++;
+      stream.ackCount++;
+      if (!isFromClient) stream.serverSynAck = true;
+    } else if (info.includes('[ACK]')) {
+      stream.ackCount++;
+      if (isFromClient && stream.clientSyn && stream.serverSynAck) stream.clientAck = true;
+    }
+
+    if (info.includes('[FIN')) stream.finCount++;
+    if (info.includes('[RST')) stream.rstCount++;
+    if (info.includes('[PSH')) stream.pshCount++;
+
+    if (pkt.appProtocol && !stream.appProtocol) stream.appProtocol = pkt.appProtocol;
+
+    if (info.includes('|') && stream.payloads.length < 5) {
+      const snip = info.split('|')[1]?.trim();
+      if (snip && !stream.payloads.includes(snip)) {
+        stream.payloads.push(snip);
+      }
+    }
+  }
+
+  const result: TcpStreamSession[] = [];
+  streamMap.forEach((s, key) => {
+    const id = streamIdMap.get(key) || 1;
+    const dur = s.endTimeMs >= s.startTimeMs && s.startTimeMs > 0 ? s.endTimeMs - s.startTimeMs : 0;
+    result.push({
+      streamId: id,
+      clientIp: s.clientIp,
+      clientPort: s.clientPort,
+      serverIp: s.serverIp,
+      serverPort: s.serverPort,
+      startTimeMs: s.startTimeMs,
+      endTimeMs: s.endTimeMs,
+      durationMs: dur,
+      clientPackets: s.clientPackets,
+      serverPackets: s.serverPackets,
+      totalPackets: s.clientPackets + s.serverPackets,
+      clientBytes: s.clientBytes,
+      serverBytes: s.serverBytes,
+      totalBytes: s.clientBytes + s.serverBytes,
+      flags: {
+        synCount: s.synCount,
+        ackCount: s.ackCount,
+        finCount: s.finCount,
+        rstCount: s.rstCount,
+        pshCount: s.pshCount,
+      },
+      isCompleteHandshake: s.clientSyn && s.serverSynAck && s.clientAck,
+      hasReset: s.rstCount > 0,
+      retransmissionCount: 0,
+      appProtocol: s.appProtocol || (s.serverPort === 80 ? 'HTTP' : s.serverPort === 443 ? 'TLS' : 'TCP'),
+      payloadSnippet: s.payloads.join(' \u2192 ') || 'No printable payload data recorded.',
+    });
+  });
+
+  return result.sort((a, b) => b.totalBytes - a.totalBytes);
+}
+
+export function reconstructHttpTransactions(packets: PcapPacket[]): HttpTransaction[] {
+  const transactions: HttpTransaction[] = [];
+  let reqId = 1;
+
+  for (let i = 0; i < packets.length; i++) {
+    const pkt = packets[i];
+    const info = pkt.info || '';
+
+    const reqMatch = info.match(/\b(GET|POST|PUT|DELETE|HEAD|OPTIONS)\s+([^\s]+)/i);
+    if (reqMatch) {
+      const method = reqMatch[1].toUpperCase();
+      const uri = reqMatch[2];
+      const hostMatch = info.match(/Host:\s*([^\s\r\n|]+)/i);
+      const host = hostMatch ? hostMatch[1] : undefined;
+
+      let statusCode: number | undefined;
+      let statusText: string | undefined;
+      let latencyMs: number | undefined;
+
+      for (let j = i + 1; j < Math.min(packets.length, i + 50); j++) {
+        const respPkt = packets[j];
+        if (respPkt.srcIp === pkt.dstIp && respPkt.srcPort === pkt.dstPort) {
+          const respMatch = respPkt.info.match(/HTTP\/[0-9.]+\s+(\d{3})\s*([^\r\n|]*)/i);
+          if (respMatch) {
+            statusCode = parseInt(respMatch[1], 10);
+            statusText = respMatch[2].trim();
+            if (respPkt.timestamp && pkt.timestamp) {
+              latencyMs = Math.max(0, respPkt.timestamp - pkt.timestamp);
+            }
+            break;
+          }
+        }
+      }
+
+      transactions.push({
+        id: `HTTP-TX-${reqId++}`,
+        method,
+        uri,
+        host,
+        clientIp: pkt.srcIp || '0.0.0.0',
+        serverIp: pkt.dstIp || '0.0.0.0',
+        statusCode,
+        statusText,
+        requestHeaders: host ? { Host: host } : {},
+        timestampMs: pkt.timestamp,
+        requestPayloadSnippet: info.includes('|') ? info.split('|')[1]?.trim() : undefined,
+      });
+    }
+  }
+
+  return transactions;
+}
+
+export function reconstructDnsTransactions(packets: PcapPacket[]): DnsTransaction[] {
+  const transactions: DnsTransaction[] = [];
+  let txIndex = 1;
+
+  for (let i = 0; i < packets.length; i++) {
+    const pkt = packets[i];
+    if (pkt.appProtocol === 'DNS' && pkt.info.includes('Query:')) {
+      const qDomain = pkt.info.split('Query:')[1]?.trim() || '';
+      if (qDomain) {
+        transactions.push({
+          id: `DNS-TX-${txIndex++}`,
+          transactionId: `0x${txIndex.toString(16).padStart(4, '0')}`,
+          clientIp: pkt.srcIp || '0.0.0.0',
+          serverIp: pkt.dstIp || '0.0.0.0',
+          queryDomain: qDomain,
+          queryType: 'A',
+          responseCode: 'NOERROR',
+          answers: [],
+          timestampMs: pkt.timestamp,
+        });
+      }
+    }
+  }
+
+  return transactions;
+}
+
+export function extractTlsHandshakes(packets: PcapPacket[]): TlsHandshakeMetadata[] {
+  const handshakes: TlsHandshakeMetadata[] = [];
+
+  for (const pkt of packets) {
+    if (pkt.appProtocol === 'TLS' || pkt.dstPort === 443 || pkt.srcPort === 443) {
+      const info = pkt.info || '';
+      let sni: string | undefined;
+
+      const sniMatch = info.match(/([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+      if (sniMatch && !sniMatch[1].includes('[') && !/^\d+\.\d+/.test(sniMatch[1])) {
+        sni = sniMatch[1];
+      }
+
+      if (info.includes('Client Hello') || info.includes('Server Hello') || info.includes('TLS')) {
+        handshakes.push({
+          clientIp: pkt.srcIp || '0.0.0.0',
+          serverIp: pkt.dstIp || '0.0.0.0',
+          clientPort: pkt.srcPort || 0,
+          serverPort: pkt.dstPort || 443,
+          serverNameIndication: sni,
+          tlsVersion: info.includes('TLSv1.3') ? 'TLS 1.3' : 'TLS 1.2',
+          timestampMs: pkt.timestamp,
+        });
+      }
+    }
+  }
+
+  return handshakes;
 }
